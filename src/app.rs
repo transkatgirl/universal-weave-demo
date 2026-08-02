@@ -261,10 +261,7 @@ impl DemoApp {
         });
     }
 
-    fn bookmarks_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("bookmarks")
-            .default_size(170.0)
-            .show(ui, |ui| {
+    fn bookmarks_view(&mut self, ui: &mut egui::Ui) {
                 ui.heading("Bookmarks");
                 ui.separator();
 
@@ -292,13 +289,9 @@ impl DemoApp {
                         self.selected = Some(id);
                     }
                 }
-            });
     }
 
-    fn inspector_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("inspector")
-            .default_size(320.0)
-            .show(ui, |ui| {
+    fn inspector_view(&mut self, ui: &mut egui::Ui) {
                 ui.heading("Inspector");
                 ui.separator();
                 self.sync_edit_buffer();
@@ -420,6 +413,18 @@ impl DemoApp {
                 {
                     self.delete_selected(id);
                 }
+    }
+
+    fn inspector_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::right("inspector")
+            .default_size(320.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.inspector_view(ui);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    self.bookmarks_view(ui);
+                });
             });
     }
 
@@ -506,7 +511,6 @@ impl eframe::App for DemoApp {
         }
 
         self.toolbar(ui);
-        self.bookmarks_panel(ui);
         self.inspector_panel(ui);
         self.status_bar(ui);
         self.action_log(ui);
