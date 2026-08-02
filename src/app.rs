@@ -207,7 +207,7 @@ impl DemoApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.heading("Universal Weave");
+                ui.heading("Universal Weave Demo");
                 ui.separator();
 
                 ui.label("Title:");
@@ -257,157 +257,155 @@ impl DemoApp {
     }
 
     fn bookmarks_view(&mut self, ui: &mut egui::Ui) {
-                ui.heading("Bookmarks");
-                ui.separator();
+        ui.heading("Bookmarks");
+        ui.separator();
 
-                if self.document.bookmarks().is_empty() {
-                    ui.weak("No bookmarks yet.");
-                }
+        if self.document.bookmarks().is_empty() {
+            ui.weak("No bookmarks yet.");
+        }
 
-                for id in self.document.bookmarks() {
-                    let label = self
-                        .document
-                        .node_contents(&id)
-                        .map(|text| {
-                            let snippet: String =
-                                text.lines().next().unwrap_or("").chars().take(24).collect();
-                            if snippet.is_empty() {
-                                format!("#{id} (empty)")
-                            } else {
-                                format!("#{id} {snippet}")
-                            }
-                        })
-                        .unwrap_or_else(|| format!("#{id}"));
-
-                    if ui.button(label).clicked() {
-                        self.document.set_active(&id);
-                        self.selected = Some(id);
+        for id in self.document.bookmarks() {
+            let label = self
+                .document
+                .node_contents(&id)
+                .map(|text| {
+                    let snippet: String =
+                        text.lines().next().unwrap_or("").chars().take(24).collect();
+                    if snippet.is_empty() {
+                        format!("#{id} (empty)")
+                    } else {
+                        format!("#{id} {snippet}")
                     }
-                }
+                })
+                .unwrap_or_else(|| format!("#{id}"));
+
+            if ui.button(label).clicked() {
+                self.document.set_active(&id);
+                self.selected = Some(id);
+            }
+        }
     }
 
     fn inspector_view(&mut self, ui: &mut egui::Ui) {
-                ui.heading("Inspector");
-                ui.separator();
-                self.sync_edit_buffer();
+        ui.heading("Inspector");
+        ui.separator();
+        self.sync_edit_buffer();
 
-                let Some(id) = self.selected else {
-                    ui.weak("No node selected. Click a node in the tree.");
-                    return;
-                };
-                let Some(info) = self.document.node_info(&id) else {
-                    self.selected = None;
-                    return;
-                };
+        let Some(id) = self.selected else {
+            ui.weak("No node selected. Click a node in the tree.");
+            return;
+        };
+        let Some(info) = self.document.node_info(&id) else {
+            self.selected = None;
+            return;
+        };
 
-                ui.label(RichText::new(format!("Node #{id}")).strong());
+        ui.label(RichText::new(format!("Node #{id}")).strong());
 
-                if info.parents.is_empty() {
-                    ui.label("Parents: — (root)");
-                } else {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Parents:");
-                        for parent in &info.parents {
-                            if ui.button(format!("#{parent}")).clicked() {
-                                self.selected = Some(*parent);
-                            }
-                        }
-                    });
+        if info.parents.is_empty() {
+            ui.label("Parents: — (root)");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Parents:");
+                for parent in &info.parents {
+                    if ui.button(format!("#{parent}")).clicked() {
+                        self.selected = Some(*parent);
+                    }
                 }
-                ui.label(format!(
-                    "Active: {}   Bookmarked: {}",
-                    info.active, info.bookmarked
-                ));
-                ui.label(format!("Length: {} bytes", info.content_len));
-                ui.separator();
+            });
+        }
+        ui.label(format!(
+            "Active: {}   Bookmarked: {}",
+            info.active, info.bookmarked
+        ));
+        ui.label(format!("Length: {} bytes", info.content_len));
+        ui.separator();
 
-                ui.label("Contents:");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.edit_buffer)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(6),
-                );
-                if ui.button("Apply edit").clicked() {
-                    let text = std::mem::take(&mut self.edit_buffer);
-                    self.document.apply_edit(&id, text.clone());
-                    self.edit_buffer = text;
-                    self.status = format!("Edited contents of #{id}");
+        ui.label("Contents:");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.edit_buffer)
+                .desired_width(f32::INFINITY)
+                .desired_rows(6),
+        );
+        if ui.button("Apply edit").clicked() {
+            let text = std::mem::take(&mut self.edit_buffer);
+            self.document.apply_edit(&id, text.clone());
+            self.edit_buffer = text;
+            self.status = format!("Edited contents of #{id}");
+        }
+        ui.separator();
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Set active").clicked() {
+                self.document.set_active(&id);
+            }
+            if ui.button("Set inactive").clicked() {
+                self.document.set_inactive(&id);
+            }
+            let bookmark_label = if info.bookmarked {
+                "Unbookmark"
+            } else {
+                "Bookmark"
+            };
+            if ui.button(bookmark_label).clicked() {
+                self.document.set_bookmarked(&id, !info.bookmarked);
+            }
+            if ui.button("Add child").clicked() {
+                self.add_child(id);
+            }
+        });
+
+        if info.content_len >= 2 {
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.split_index).range(1..=info.content_len - 1));
+                if ui.button("Split here").clicked() {
+                    self.split_selected(id);
                 }
-                ui.separator();
+            });
+        }
 
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Set active").clicked() {
-                        self.document.set_active(&id);
-                    }
-                    if ui.button("Set inactive").clicked() {
-                        self.document.set_inactive(&id);
-                    }
-                    let bookmark_label = if info.bookmarked { "Unbookmark" } else { "Bookmark" };
-                    if ui.button(bookmark_label).clicked() {
-                        self.document.set_bookmarked(&id, !info.bookmarked);
-                    }
-                    if ui.button("Add child").clicked() {
-                        self.add_child(id);
-                    }
-                });
+        ui.horizontal_wrapped(|ui| {
+            if !info.parents.is_empty() && ui.button("Merge with parent").clicked() {
+                self.merge_selected(id);
+            }
+            if info.children.len() >= 2 && ui.button("Sort children A→Z").clicked() {
+                self.document.sort_children(&id);
+            }
+            if ui.button("Find duplicates").clicked() {
+                self.find_duplicates(id);
+            }
+        });
 
-                if info.content_len >= 2 {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.split_index)
-                                .range(1..=info.content_len - 1),
-                        );
-                        if ui.button("Split here").clicked() {
-                            self.split_selected(id);
-                        }
-                    });
+        if self.document.kind() == WeaveKind::Independent {
+            ui.separator();
+            ui.label("Move node — new parent ids (comma-separated, empty = root):");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.move_buffer).desired_width(140.0));
+                if ui.button("Move").clicked() {
+                    self.move_selected(id);
                 }
+            });
+        }
+        ui.separator();
 
-                ui.horizontal_wrapped(|ui| {
-                    if !info.parents.is_empty() && ui.button("Merge with parent").clicked() {
-                        self.merge_selected(id);
+        if !info.children.is_empty() {
+            ui.label("Children:");
+            ui.horizontal_wrapped(|ui| {
+                for child in &info.children {
+                    if ui.button(format!("#{child}")).clicked() {
+                        self.selected = Some(*child);
                     }
-                    if info.children.len() >= 2 && ui.button("Sort children A→Z").clicked() {
-                        self.document.sort_children(&id);
-                    }
-                    if ui.button("Find duplicates").clicked() {
-                        self.find_duplicates(id);
-                    }
-                });
-
-                if self.document.kind() == WeaveKind::Independent {
-                    ui.separator();
-                    ui.label("Move node — new parent ids (comma-separated, empty = root):");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.move_buffer)
-                                .desired_width(140.0),
-                        );
-                        if ui.button("Move").clicked() {
-                            self.move_selected(id);
-                        }
-                    });
                 }
-                ui.separator();
+            });
+            ui.separator();
+        }
 
-                if !info.children.is_empty() {
-                    ui.label("Children:");
-                    ui.horizontal_wrapped(|ui| {
-                        for child in &info.children {
-                            if ui.button(format!("#{child}")).clicked() {
-                                self.selected = Some(*child);
-                            }
-                        }
-                    });
-                    ui.separator();
-                }
-
-                if ui
-                    .button(RichText::new("Delete subtree").color(Color32::LIGHT_RED))
-                    .clicked()
-                {
-                    self.delete_selected(id);
-                }
+        if ui
+            .button(RichText::new("Delete subtree").color(Color32::LIGHT_RED))
+            .clicked()
+        {
+            self.delete_selected(id);
+        }
     }
 
     fn inspector_panel(&mut self, ui: &mut egui::Ui) {
