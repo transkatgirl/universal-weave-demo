@@ -1,0 +1,17 @@
+[package]
+name    = "universal-weave-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+universal-weave = { version = "0.2.0", features = [
+	"rkyv",
+	"serde",
+	"loro",
+] }
+eframe = "0.35"
+dagre = "0.1.1"
+rfd = "0.17"
+rkyv = { version = "0.8.17", features = [
+	"bytecheck",
+] }
