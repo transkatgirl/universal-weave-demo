@@ -252,11 +252,6 @@ impl DemoApp {
 
                 ui.weak(self.document.kind().label());
                 ui.label(format!("{} nodes", self.document.len()));
-                if self.document.is_valid() {
-                    ui.label(RichText::new("valid").color(Color32::from_rgb(80, 200, 120)));
-                } else {
-                    ui.label(RichText::new("INVALID").color(Color32::RED));
-                }
             });
         });
     }

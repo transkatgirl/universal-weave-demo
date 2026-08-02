@@ -110,6 +110,7 @@ impl Document {
         }
     }
 
+    #[cfg(test)]
     pub fn is_valid(&self) -> bool {
         match self {
             Self::Dependent(weave) => weave.as_weave().validate(),
