@@ -6,7 +6,7 @@ use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
 use universal_weave::wrappers::{LoggedWeave, WeaveAction};
 use universal_weave::{
-    ActivePathWeave, ActiveSingularWeave, BookmarkableWeave, DiscreteWeave, IndependentWeave as _,
+    ActivePathWeave, ActiveSingularWeave, BookmarkableWeave, DiscreteWeave, IndependentWeave,
     MetadataWeave, Node, SemiIndependentWeave, SortableWeave, Weave,
 };
 
@@ -90,7 +90,7 @@ impl Document {
         match kind {
             WeaveKind::Dependent => {
                 let mut weave = DemoWeave::with_capacity(8, "Untitled document".to_string());
-                weave.add_node(DemoNode {
+                weave.insert(DemoNode {
                     id: 0,
                     from: None,
                     to: IndexSet::default(),
@@ -103,7 +103,7 @@ impl Document {
             WeaveKind::Independent => {
                 let mut weave =
                     IndependentDemoWeave::with_capacity(8, "Untitled document".to_string());
-                weave.add_node(IndependentDemoNode {
+                weave.insert(IndependentDemoNode {
                     id: 0,
                     from: IndexSet::default(),
                     to: IndexSet::default(),
@@ -115,7 +115,7 @@ impl Document {
             }
             WeaveKind::DependentLoro => {
                 let mut weave = DemoWeave::with_capacity(8, "Untitled document".to_string());
-                weave.add_node(DemoNode {
+                weave.insert(DemoNode {
                     id: 0,
                     from: None,
                     to: IndexSet::default(),
@@ -196,21 +196,21 @@ impl Document {
 
     pub fn node_info(&self, id: &u64) -> Option<NodeInfo> {
         match self {
-            Self::Dependent(weave) => weave.get_node(id).map(|node| NodeInfo {
+            Self::Dependent(weave) => weave.get(id).map(|node| NodeInfo {
                 parents: node.from.into_iter().collect(),
                 children: node.to.iter().copied().collect(),
                 active: node.active,
                 bookmarked: node.bookmarked,
                 content_len: node.contents.0.len(),
             }),
-            Self::Independent(weave) => weave.get_node(id).map(|node| NodeInfo {
+            Self::Independent(weave) => weave.get(id).map(|node| NodeInfo {
                 parents: node.from.iter().copied().collect(),
                 children: node.to.iter().copied().collect(),
                 active: node.active,
                 bookmarked: node.bookmarked,
                 content_len: node.contents.0.len(),
             }),
-            Self::DependentLoro(weave) => weave.get_node(id).map(|node| NodeInfo {
+            Self::DependentLoro(weave) => weave.get(id).map(|node| NodeInfo {
                 parents: node.from.into_iter().collect(),
                 children: node.to.iter().copied().collect(),
                 active: node.active,
@@ -222,9 +222,9 @@ impl Document {
 
     pub fn node_contents(&self, id: &u64) -> Option<String> {
         match self {
-            Self::Dependent(weave) => weave.get_node(id).map(|node| node.contents.0.clone()),
-            Self::Independent(weave) => weave.get_node(id).map(|node| node.contents.0.clone()),
-            Self::DependentLoro(weave) => weave.get_node(id).map(|node| node.contents.0.clone()),
+            Self::Dependent(weave) => weave.get(id).map(|node| node.contents.0.clone()),
+            Self::Independent(weave) => weave.get(id).map(|node| node.contents.0.clone()),
+            Self::DependentLoro(weave) => weave.get(id).map(|node| node.contents.0.clone()),
         }
     }
 
@@ -232,16 +232,16 @@ impl Document {
     pub fn tree_nodes(&mut self) -> Vec<TreeNode> {
         let mut order = Vec::new();
         match self {
-            Self::Dependent(weave) => weave.get_ordered_node_identifiers(&mut order),
-            Self::Independent(weave) => weave.get_ordered_node_identifiers(&mut order),
-            Self::DependentLoro(weave) => weave.get_ordered_node_identifiers(&mut order),
+            Self::Dependent(weave) => weave.get_ordered_identifiers(&mut order),
+            Self::Independent(weave) => weave.get_ordered_identifiers(&mut order),
+            Self::DependentLoro(weave) => weave.get_ordered_identifiers(&mut order),
         }
 
         let mut nodes = Vec::with_capacity(order.len());
         for id in order {
             match self {
                 Self::Dependent(weave) => {
-                    if let Some(node) = weave.get_node(&id) {
+                    if let Some(node) = weave.get(&id) {
                         nodes.push(TreeNode {
                             id: node.id,
                             parents: node.from.into_iter().collect(),
@@ -251,7 +251,7 @@ impl Document {
                     }
                 }
                 Self::Independent(weave) => {
-                    if let Some(node) = weave.get_node(&id) {
+                    if let Some(node) = weave.get(&id) {
                         nodes.push(TreeNode {
                             id: node.id,
                             parents: node.from.iter().copied().collect(),
@@ -261,7 +261,7 @@ impl Document {
                     }
                 }
                 Self::DependentLoro(weave) => {
-                    if let Some(node) = weave.get_node(&id) {
+                    if let Some(node) = weave.get(&id) {
                         nodes.push(TreeNode {
                             id: node.id,
                             parents: node.from.into_iter().collect(),
@@ -307,7 +307,7 @@ impl Document {
     /// Adds a new active root node with the given id.
     pub fn add_root(&mut self, id: u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.add_node(DemoNode {
+            Self::Dependent(weave) => weave.insert(DemoNode {
                 id,
                 from: None,
                 to: IndexSet::default(),
@@ -315,7 +315,7 @@ impl Document {
                 bookmarked: false,
                 contents: TextContent::default(),
             }),
-            Self::Independent(weave) => weave.add_node(IndependentDemoNode {
+            Self::Independent(weave) => weave.insert(IndependentDemoNode {
                 id,
                 from: IndexSet::default(),
                 to: IndexSet::default(),
@@ -323,7 +323,7 @@ impl Document {
                 bookmarked: false,
                 contents: TextContent::default(),
             }),
-            Self::DependentLoro(weave) => weave.add_node(DemoNode {
+            Self::DependentLoro(weave) => weave.insert(DemoNode {
                 id,
                 from: None,
                 to: IndexSet::default(),
@@ -337,7 +337,7 @@ impl Document {
     /// Adds a new active child node with the given id under a single parent.
     pub fn add_child(&mut self, parent: &u64, id: u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.add_node(DemoNode {
+            Self::Dependent(weave) => weave.insert(DemoNode {
                 id,
                 from: Some(*parent),
                 to: IndexSet::default(),
@@ -345,7 +345,7 @@ impl Document {
                 bookmarked: false,
                 contents: TextContent::default(),
             }),
-            Self::Independent(weave) => weave.add_node(IndependentDemoNode {
+            Self::Independent(weave) => weave.insert(IndependentDemoNode {
                 id,
                 from: IndexSet::from_iter([*parent]),
                 to: IndexSet::default(),
@@ -353,7 +353,7 @@ impl Document {
                 bookmarked: false,
                 contents: TextContent::default(),
             }),
-            Self::DependentLoro(weave) => weave.add_node(DemoNode {
+            Self::DependentLoro(weave) => weave.insert(DemoNode {
                 id,
                 from: Some(*parent),
                 to: IndexSet::default(),
@@ -367,18 +367,18 @@ impl Document {
     /// Makes the given node active (the tip of the active path).
     pub fn set_active(&mut self, id: &u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.set_node_active_status(id, true),
-            Self::Independent(weave) => weave.set_node_active_status(id, true),
-            Self::DependentLoro(weave) => weave.set_node_active_status(id, true),
+            Self::Dependent(weave) => weave.set_active(id, true),
+            Self::Independent(weave) => weave.set_active(id, true),
+            Self::DependentLoro(weave) => weave.set_active(id, true),
         }
     }
 
     /// Makes the given node inactive.
     pub fn set_inactive(&mut self, id: &u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.set_node_active_status(id, false),
-            Self::Independent(weave) => weave.set_node_active_status(id, false),
-            Self::DependentLoro(weave) => weave.set_node_active_status(id, false),
+            Self::Dependent(weave) => weave.set_active(id, false),
+            Self::Independent(weave) => weave.set_active(id, false),
+            Self::DependentLoro(weave) => weave.set_active(id, false),
         }
     }
 
@@ -393,9 +393,9 @@ impl Document {
 
     pub fn set_bookmarked(&mut self, id: &u64, value: bool) -> bool {
         match self {
-            Self::Dependent(weave) => weave.set_node_bookmarked_status(id, value),
-            Self::Independent(weave) => weave.set_node_bookmarked_status(id, value),
-            Self::DependentLoro(weave) => weave.set_node_bookmarked_status(id, value),
+            Self::Dependent(weave) => weave.set_bookmarked(id, value),
+            Self::Independent(weave) => weave.set_bookmarked(id, value),
+            Self::DependentLoro(weave) => weave.set_bookmarked(id, value),
         }
     }
 
@@ -417,8 +417,8 @@ impl Document {
     /// Splits a node's contents at the given byte index; the tail becomes node `new_id`.
     pub fn split(&mut self, id: &u64, at: usize, new_id: u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.split_node(id, at, new_id),
-            Self::Independent(weave) => weave.split_node(id, at, new_id),
+            Self::Dependent(weave) => weave.split(id, at, new_id),
+            Self::Independent(weave) => weave.split(id, at, new_id),
             Self::DependentLoro(_) => false,
         }
     }
@@ -436,13 +436,13 @@ impl Document {
     pub fn sort_children(&mut self, id: &u64) -> bool {
         match self {
             Self::Dependent(weave) => {
-                weave.sort_node_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
+                weave.sort_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
             }
             Self::Independent(weave) => {
-                weave.sort_node_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
+                weave.sort_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
             }
             Self::DependentLoro(weave) => {
-                weave.sort_node_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
+                weave.sort_children_by(id, |a, b| a.contents.0.cmp(&b.contents.0))
             }
         }
     }
@@ -450,9 +450,9 @@ impl Document {
     /// Sorts a node's children by their identifiers.
     pub fn sort_children_by_id(&mut self, id: &u64) -> bool {
         match self {
-            Self::Dependent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
-            Self::Independent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
-            Self::DependentLoro(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
+            Self::Dependent(weave) => weave.sort_children_by_id(id, Ord::cmp),
+            Self::Independent(weave) => weave.sort_children_by_id(id, Ord::cmp),
+            Self::DependentLoro(weave) => weave.sort_children_by_id(id, Ord::cmp),
         }
     }
 
@@ -460,9 +460,9 @@ impl Document {
     pub fn remove(&mut self, id: &u64) -> Option<usize> {
         let mut removed = 0usize;
         let existed = match self {
-            Self::Dependent(weave) => weave.remove_node_tracked(id, |_| removed += 1),
-            Self::Independent(weave) => weave.remove_node_tracked(id, |_| removed += 1),
-            Self::DependentLoro(weave) => weave.remove_node_tracked(id, |_| removed += 1),
+            Self::Dependent(weave) => weave.remove_tracked(id, |_| removed += 1),
+            Self::Independent(weave) => weave.remove_tracked(id, |_| removed += 1),
+            Self::DependentLoro(weave) => weave.remove_tracked(id, |_| removed += 1),
         };
         existed.then_some(removed)
     }
@@ -474,7 +474,7 @@ impl Document {
                 Err("Moving nodes is only supported by IndependentWeave documents".to_string())
             }
             Self::Independent(weave) => {
-                if weave.move_node(id, new_parents) {
+                if weave.move_to(id, new_parents) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -631,35 +631,35 @@ pub fn seeded_dependent() -> Document {
         contents: TextContent(text.to_string()),
     };
 
-    weave.add_node(node(
+    weave.insert(node(
         0,
         None,
         false,
         false,
         "The lighthouse keeper found the letter on a Tuesday. ",
     ));
-    weave.add_node(node(
+    weave.insert(node(
         1,
         Some(0),
         false,
         true,
         "It was written in a language that smelled of salt. ",
     ));
-    weave.add_node(node(
+    weave.insert(node(
         3,
         Some(1),
         true,
         false,
         "She read it three times before the lamp went out. ",
     ));
-    weave.add_node(node(
+    weave.insert(node(
         2,
         Some(0),
         false,
         false,
         "It was addressed to someone who had drowned fifty years ago. ",
     ));
-    weave.add_node(node(
+    weave.insert(node(
         4,
         Some(2),
         false,
@@ -709,7 +709,7 @@ impl FormatNode for IndependentDemoNode {
 /// Produces a short human-readable summary of a logged action.
 fn format_action<N: FormatNode>(action: &WeaveAction<u64, N, TextContent, String>) -> String {
     match action {
-        WeaveAction::AddNode(node) => {
+        WeaveAction::Insert(node) => {
             let parents = node.parent_ids();
             let parent = if parents.is_empty() {
                 "root".to_string()
@@ -722,31 +722,31 @@ fn format_action<N: FormatNode>(action: &WeaveAction<u64, N, TextContent, String
             };
             format!("AddNode      #{id:<4} parent={parent}", id = node.id())
         }
-        WeaveAction::SetNodeActiveStatus { id, value } => {
+        WeaveAction::SetActive { id, value } => {
             format!("SetActive    #{id:<4} value={value}")
         }
-        WeaveAction::SetNodeBookmarkedStatus { id, value } => {
+        WeaveAction::SetBookmarked { id, value } => {
             format!("SetBookmark  #{id:<4} value={value}")
         }
-        WeaveAction::RemoveNode(id) => format!("RemoveNode   #{id}"),
-        WeaveAction::RemoveAllNodes => "RemoveAll".to_string(),
+        WeaveAction::Remove(id) => format!("RemoveNode   #{id}"),
+        WeaveAction::Clear => "RemoveAll".to_string(),
         WeaveAction::SetMetadata(metadata) => format!("SetMetadata  \"{metadata}\""),
-        WeaveAction::SetNodeChildOrdering { parent, children } => {
+        WeaveAction::SetChildOrdering { parent, children } => {
             let parent = parent.map_or_else(|| "roots".to_string(), |p| format!("#{p}"));
             format!("Reorder      {parent} → {children:?}")
         }
         WeaveAction::SetBookmarkOrdering(order) => format!("ReorderBookmarks {order:?}"),
         WeaveAction::SetActivePath(path) => format!("SetActivePath {path:?}"),
-        WeaveAction::MoveNode { id, new_parents } => {
+        WeaveAction::MoveTo { id, new_parents } => {
             format!("MoveNode     #{id} → {new_parents:?}")
         }
-        WeaveAction::SetNodeContent { id, contents } => {
+        WeaveAction::SetContents { id, contents } => {
             format!("SetContent   #{id:<4} {} bytes", contents.0.len())
         }
-        WeaveAction::SplitNode { id, at, new_id } => {
+        WeaveAction::Split { id, at, new_id } => {
             format!("SplitNode    #{id:<4} at={at} → #{new_id}")
         }
-        WeaveAction::MergeNodeWithParent(id) => format!("MergeNode    #{id}"),
+        WeaveAction::MergeWithParent(id) => format!("MergeNode    #{id}"),
         _ => "Other".to_string(),
     }
 }
@@ -847,10 +847,10 @@ mod tests {
             contents: TextContent::default(),
         };
 
-        weave.add_node(node(0, &[]));
-        weave.add_node(node(1, &[0]));
-        weave.add_node(node(2, &[0]));
-        weave.add_node(node(3, &[1]));
+        weave.insert(node(0, &[]));
+        weave.insert(node(1, &[0]));
+        weave.insert(node(2, &[0]));
+        weave.insert(node(3, &[1]));
 
         let mut document = Document::new_independent(weave);
 
@@ -885,10 +885,10 @@ mod tests {
             contents: TextContent::default(),
         };
 
-        weave.add_node(node(0, &[]));
-        weave.add_node(node(1, &[0]));
-        weave.add_node(node(2, &[0]));
-        weave.add_node(node(3, &[1, 2])); // shared child
+        weave.insert(node(0, &[]));
+        weave.insert(node(1, &[0]));
+        weave.insert(node(2, &[0]));
+        weave.insert(node(3, &[1, 2])); // shared child
 
         let mut document = Document::new_independent(weave);
 
