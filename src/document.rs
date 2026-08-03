@@ -6,8 +6,8 @@ use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
 use universal_weave::wrappers::{LoggedWeave, WeaveAction};
 use universal_weave::{
-    ActivePathWeave, ActiveSingularWeave, BookmarkableWeave, DeduplicatableWeave, DiscreteWeave,
-    IndependentWeave as _, MetadataWeave, Node, SemiIndependentWeave, SortableWeave, Weave,
+    ActivePathWeave, ActiveSingularWeave, BookmarkableWeave, DiscreteWeave, IndependentWeave as _,
+    MetadataWeave, Node, SemiIndependentWeave, SortableWeave, Weave,
 };
 
 use crate::content::{
@@ -453,15 +453,6 @@ impl Document {
             Self::Dependent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
             Self::Independent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
             Self::DependentLoro(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
-        }
-    }
-
-    /// Finds siblings of a node with duplicate contents.
-    pub fn find_duplicates(&self, id: &u64) -> Vec<u64> {
-        match self {
-            Self::Dependent(weave) => weave.find_duplicates(id).collect(),
-            Self::Independent(weave) => weave.find_duplicates(id).collect(),
-            Self::DependentLoro(weave) => weave.find_duplicates(id).collect(),
         }
     }
 
@@ -932,7 +923,6 @@ mod tests {
         assert!(document.add_child(&3, 5));
         assert!(document.set_active(&5));
         assert!(document.sort_children_by_id(&0));
-        assert!(document.find_duplicates(&3).is_empty());
         assert!(document.is_valid());
         assert!(!document.split(&3, 2, 6));
         assert_eq!(document.merge_with_parent(&3), None);

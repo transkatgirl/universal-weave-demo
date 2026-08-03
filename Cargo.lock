@@ -4220,9 +4220,9 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "universal-weave"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cea7c953e820f101c566da5c575346ff7ad1c5022093c72115c97a3a848f4161"
+checksum = "bab03f171167e5191e6b7917f15566f3431e4c8aaa565d280ecd3d59d2b1571f"
 dependencies = [
  "contracts",
  "hashbrown 0.17.1",

@@ -163,19 +163,6 @@ impl EditorState {
         }
     }
 
-    fn find_duplicates(&mut self, id: u64) {
-        let duplicates = self.document.find_duplicates(&id);
-        self.status = if duplicates.is_empty() {
-            format!("Node #{id} has no duplicate siblings")
-        } else {
-            let ids = duplicates
-                .iter()
-                .map(|id| format!("#{id}"))
-                .collect::<Vec<_>>();
-            format!("Node #{id} duplicates: {}", ids.join(", "))
-        };
-    }
-
     fn delete_selected(&mut self, id: u64) {
         match self.document.remove(&id) {
             Some(removed) => {
@@ -371,9 +358,6 @@ impl EditorState {
             }
             if info.children.len() >= 2 && ui.button("Sort children by ID").clicked() {
                 self.document.sort_children_by_id(&id);
-            }
-            if ui.button("Find duplicates").clicked() {
-                self.find_duplicates(id);
             }
         });
 
