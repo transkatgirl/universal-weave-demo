@@ -371,6 +371,9 @@ impl DemoApp {
             if info.children.len() >= 2 && ui.button("Sort children A→Z").clicked() {
                 self.document.sort_children(&id);
             }
+            if info.children.len() >= 2 && ui.button("Sort children by ID").clicked() {
+                self.document.sort_children_by_id(&id);
+            }
             if ui.button("Find duplicates").clicked() {
                 self.find_duplicates(id);
             }

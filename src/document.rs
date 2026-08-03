@@ -358,6 +358,14 @@ impl Document {
         }
     }
 
+    /// Sorts a node's children by their identifiers.
+    pub fn sort_children_by_id(&mut self, id: &u64) -> bool {
+        match self {
+            Self::Dependent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
+            Self::Independent(weave) => weave.sort_node_children_by_id(id, Ord::cmp),
+        }
+    }
+
     /// Finds siblings of a node with duplicate contents.
     pub fn find_duplicates(&self, id: &u64) -> Vec<u64> {
         match self {
@@ -585,6 +593,20 @@ mod tests {
 
             assert!(document.toggle_active(&3));
             assert!(document.node_info(&3).unwrap().active);
+            assert!(document.is_valid());
+        }
+    }
+
+    #[test]
+    fn children_can_be_sorted_by_id() {
+        for kind in [WeaveKind::Dependent, WeaveKind::Independent] {
+            let mut document = Document::empty(kind);
+            assert!(document.add_child(&0, 2));
+            assert!(document.add_child(&0, 1));
+            assert_eq!(document.node_info(&0).unwrap().children, vec![2, 1]);
+
+            assert!(document.sort_children_by_id(&0));
+            assert_eq!(document.node_info(&0).unwrap().children, vec![1, 2]);
             assert!(document.is_valid());
         }
     }
