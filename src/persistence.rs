@@ -6,6 +6,7 @@ use rkyv::{
     rancor::{self, Strategy},
     util::AlignedVec,
 };
+use universal_weave::loro::LoroDoc;
 use universal_weave::versioning::VersionedBytes;
 
 use crate::content::{DemoWeave, IndependentDemoWeave};
@@ -17,6 +18,8 @@ const FORMAT_IDENTIFIER: [u8; 24] = *b"UNIVERSAL-WEAVE-DEMO\0\0\0\0";
 const VERSION_DEPENDENT: u64 = 1;
 /// Format version for independent (DAG-based) documents.
 const VERSION_INDEPENDENT: u64 = 2;
+/// Format version for collaborative dependent documents (full-history Loro snapshot).
+const VERSION_DEPENDENT_LORO: u64 = 3;
 
 /// Serializes a document to a file, prefixed with a [`VersionedBytes`] header.
 ///
@@ -26,12 +29,18 @@ pub fn save_document(path: &Path, document: &Document) -> Result<(), String> {
         Document::Dependent(weave) => (
             VERSION_DEPENDENT,
             rkyv::to_bytes::<rancor::Error>(weave.as_weave())
-                .map_err(|e| format!("serialization failed: {e}"))?,
+                .map_err(|e| format!("serialization failed: {e}"))?
+                .into_vec(),
         ),
         Document::Independent(weave) => (
             VERSION_INDEPENDENT,
             rkyv::to_bytes::<rancor::Error>(weave.as_weave())
-                .map_err(|e| format!("serialization failed: {e}"))?,
+                .map_err(|e| format!("serialization failed: {e}"))?
+                .into_vec(),
+        ),
+        Document::DependentLoro(_) => (
+            VERSION_DEPENDENT_LORO,
+            document.export_collaborative_snapshot()?,
         ),
     };
 
@@ -75,8 +84,23 @@ pub fn load_document(path: &Path) -> Result<Document, String> {
                 .map_err(|e| format!("file failed validation: {e}"))?;
             Ok(Document::new_independent(weave))
         }
+        VERSION_DEPENDENT_LORO => {
+            let doc = LoroDoc::new();
+            let status = doc
+                .import(versioned.data)
+                .map_err(|e| format!("Loro snapshot import failed: {e}"))?;
+            if status.pending.is_some() {
+                return Err("Loro snapshot is missing dependent updates".to_string());
+            }
+            let weave = crate::content::CollaborativeDemoWeave::from_doc(doc)
+                .map_err(|e| format!("Loro document failed validation: {e}"))?;
+            if !weave.validate() {
+                return Err("Loro document failed post-load validation".to_string());
+            }
+            Ok(Document::new_collaborative(weave))
+        }
         other => Err(format!(
-            "unsupported format version {other} (expected {VERSION_DEPENDENT} or {VERSION_INDEPENDENT})"
+            "unsupported format version {other} (expected {VERSION_DEPENDENT}, {VERSION_INDEPENDENT}, or {VERSION_DEPENDENT_LORO})"
         )),
     }
 }
@@ -84,10 +108,15 @@ pub fn load_document(path: &Path) -> Result<Document, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{WeaveKind, seeded_dependent, seeded_independent};
+    use crate::document::{
+        WeaveKind, seeded_collaborative, seeded_dependent, seeded_independent, synchronize_pair,
+    };
 
     fn temp_file(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("universal-weave-demo-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "universal-weave-demo-test-{name}-{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir.join(format!("{name}.uweave"))
     }
@@ -101,7 +130,7 @@ mod tests {
         let loaded = load_document(&path).unwrap();
 
         fs::remove_file(&path).ok();
-        fs::remove_dir(&path.parent().unwrap()).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
 
         let Document::Dependent(loaded) = loaded else {
             panic!("expected a dependent document");
@@ -121,7 +150,7 @@ mod tests {
         let loaded = load_document(&path).unwrap();
 
         fs::remove_file(&path).ok();
-        fs::remove_dir(&path.parent().unwrap()).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
 
         let Document::Independent(loaded) = loaded else {
             panic!("expected an independent document");
@@ -135,7 +164,11 @@ mod tests {
 
     #[test]
     fn empty_document_roundtrip() {
-        for kind in [WeaveKind::Dependent, WeaveKind::Independent] {
+        for kind in [
+            WeaveKind::Dependent,
+            WeaveKind::Independent,
+            WeaveKind::DependentLoro,
+        ] {
             let document = Document::empty(kind);
             let path = temp_file(&format!("empty-{kind:?}"));
 
@@ -143,7 +176,7 @@ mod tests {
             let loaded = load_document(&path).unwrap();
 
             fs::remove_file(&path).ok();
-            fs::remove_dir(&path.parent().unwrap()).ok();
+            fs::remove_dir(path.parent().unwrap()).ok();
 
             assert_eq!(loaded.kind(), kind);
             assert_eq!(loaded.len(), 1);
@@ -155,14 +188,43 @@ mod tests {
     fn load_rejects_bad_magic() {
         let path = temp_file("bad-magic");
 
-        fs::write(&path, b"this is not a weave file, but it is long enough to pass the size check")
-            .unwrap();
+        fs::write(
+            &path,
+            b"this is not a weave file, but it is long enough to pass the size check",
+        )
+        .unwrap();
         let result = load_document(&path);
 
         fs::remove_file(&path).ok();
-        fs::remove_dir(&path.parent().unwrap()).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn collaborative_snapshot_roundtrip_can_fork_and_continue_syncing() {
+        let mut document = seeded_collaborative();
+        assert!(document.apply_edit(&3, "saved collaborative value".to_string()));
+        let path = temp_file("collaborative-roundtrip");
+
+        save_document(&path, &document).unwrap();
+        let mut loaded = load_document(&path).unwrap();
+        fs::remove_file(&path).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
+
+        assert_eq!(loaded.kind(), WeaveKind::DependentLoro);
+        assert_eq!(
+            loaded.node_contents(&3).as_deref(),
+            Some("saved collaborative value")
+        );
+        assert!(loaded.is_valid());
+
+        let mut peer_b = loaded.fork_collaborative().unwrap();
+        assert!(loaded.add_child(&3, 5));
+        assert!(peer_b.add_child(&3, 6));
+        synchronize_pair(&mut loaded, &mut peer_b).unwrap();
+        assert!(loaded.contains(&5) && loaded.contains(&6));
+        assert!(peer_b.contains(&5) && peer_b.contains(&6));
     }
 
     #[test]
@@ -177,9 +239,12 @@ mod tests {
         let result = load_document(&path);
 
         fs::remove_file(&path).ok();
-        fs::remove_dir(&path.parent().unwrap()).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
 
         let error = result.err().unwrap();
-        assert!(error.contains("unsupported format version 99"), "unexpected error: {error}");
+        assert!(
+            error.contains("unsupported format version 99"),
+            "unexpected error: {error}"
+        );
     }
 }

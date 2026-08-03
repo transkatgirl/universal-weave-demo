@@ -5,7 +5,7 @@ use std::hash::RandomState;
 use rkyv::{Archive, Deserialize, Serialize};
 use universal_weave::{
     DeduplicatableContents, DiscreteContentResult, DiscreteContents, IndependentContents,
-    dependent::{DependentNode, DependentWeave},
+    dependent::{DependentNode, DependentWeave, loro::DependentLoroWeave},
     independent::{IndependentNode, IndependentWeave},
 };
 
@@ -13,6 +13,8 @@ use universal_weave::{
 pub type DemoWeave = DependentWeave<u64, TextContent, String, RandomState>;
 /// The tree-based node type used by the demo.
 pub type DemoNode = DependentNode<u64, TextContent, RandomState>;
+/// The collaborative tree-based weave type used by the demo.
+pub type CollaborativeDemoWeave = DependentLoroWeave<u64, TextContent, String, RandomState>;
 /// The DAG-based weave type used by the demo: text nodes with a document title as metadata.
 pub type IndependentDemoWeave = IndependentWeave<u64, TextContent, String, RandomState>;
 /// The DAG-based node type used by the demo.
@@ -34,10 +36,7 @@ impl DiscreteContents for TextContent {
 
         let (left, right) = self.0.split_at(at);
 
-        DiscreteContentResult::Two(
-            TextContent(left.to_owned()),
-            TextContent(right.to_owned()),
-        )
+        DiscreteContentResult::Two(TextContent(left.to_owned()), TextContent(right.to_owned()))
     }
 
     fn merge(self, value: Self) -> DiscreteContentResult<Self> {
