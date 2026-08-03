@@ -8,9 +8,9 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Str
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
-const X_GAP: f32 = 60.0;
-const Y_GAP: f32 = 18.0;
-const MARGIN: f32 = 24.0;
+const X_GAP: f32 = 80.0;
+const Y_GAP: f32 = 30.0;
+const MARGIN: f32 = 30.0;
 
 /// A weave-agnostic snapshot of a node, used for rendering.
 pub struct TreeNode {
@@ -55,7 +55,11 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
             graph.set_edge(
                 parent.to_string(),
                 node.id.to_string(),
-                Some(EdgeLabel::default()),
+                Some(EdgeLabel {
+                    minlen: 1,
+                    weight: 1,
+                    ..EdgeLabel::default()
+                }),
                 None,
             );
         }
@@ -66,7 +70,6 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         Some(LayoutOptions {
             rankdir: RankDir::LR,
             align: Some(dagre::Align::UL),
-            ranker: dagre::Ranker::NetworkSimplex,
             nodesep: f64::from(Y_GAP),
             ranksep: f64::from(X_GAP),
             marginx: f64::from(MARGIN),
