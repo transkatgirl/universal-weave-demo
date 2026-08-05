@@ -16,7 +16,9 @@ use std::hash::RandomState;
 use eframe::egui::{
     self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 };
-use universal_weave_layout::{self, Layout3Config, NodeLayout3, curve, glam::Vec3};
+use universal_weave_layout::{
+    self, EdgeEndpoints, Layout3Config, NodeLayout3, curve, glam::Vec3,
+};
 
 use crate::tree_view::{LayoutNode, TreeNode, TreeResponse, build_graph};
 
@@ -27,6 +29,10 @@ const NODE_D: f32 = 1.0;
 const NODE_SPACING: f32 = 30.0;
 const RANK_SPACING: f32 = 130.0;
 const RADIUS_GROWTH: f32 = 48.0;
+/// Arc-length width reserved around each long edge's bend points, so connectors
+/// crossing a rank get their own lane on its circle instead of grazing the
+/// cards there. Matches the 2D view's lane width.
+const EDGE_SPACING: f32 = 16.0;
 const CURVE_FIT_TOLERANCE: f32 = 2.0;
 const FLATTEN_TOLERANCE: f32 = 1.0;
 
@@ -165,6 +171,11 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
             node_spacing: NODE_SPACING,
             rank_spacing: RANK_SPACING,
             radius_growth: RADIUS_GROWTH,
+            edge_spacing: EDGE_SPACING,
+            // As in the 2D view, routes start and end on the facing card
+            // borders; the billboards cover the joints either way, but ending
+            // at the border keeps the curve's tangents out of the cards.
+            endpoints: EdgeEndpoints::Border,
         },
         |_| Vec3::new(NODE_W, NODE_H, NODE_D),
     );
@@ -181,8 +192,8 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
 
     // Fit and flatten in the layout's own space, where ranks advance along +y,
     // so the endpoint tangents follow the rank axis; the reflection is applied
-    // to the resulting points. Unlike the 2D view the endpoints are not clipped
-    // to the card borders: the opaque billboards cover the joints instead.
+    // to the resulting points. The endpoints sit on the cards' `y` borders,
+    // which the billboards cover once the geometry is projected.
     let edges = computed
         .edges
         .iter()
