@@ -33,6 +33,10 @@ const NODE_D: f32 = 1.0;
 /// radii that keep it are emergent, so this is the only lever on how wide the
 /// cone opens.
 const NODE_SPACING: f32 = 30.0;
+/// Minimum gap kept around the corridor an edge skipping ranks reserves on its
+/// source's children circle. As in the 2D view the corridors themselves are
+/// widthless, so this is what holds the connectors off the cards they pass.
+const EDGE_GAP: f32 = 20.0;
 const RANK_SPACING: f32 = 130.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
 /// a fraction of half the segment's axial span. `1.0` is the roundest.
@@ -173,6 +177,11 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
         &Layout3Config {
             node_spacing: NODE_SPACING,
             rank_spacing: RANK_SPACING,
+            // Connectors are thin lines, so their corridors need no width of
+            // their own; reserving the position is what keeps the waypoints
+            // clear of each rank's cards, and `dummy_spacing` sets the margin.
+            edge_spacing: 0.0,
+            dummy_spacing: Some(EDGE_GAP),
             // As in the 2D view, routes start and end on the facing card
             // borders; the billboards cover the joints either way, but ending
             // at the border keeps the curve's tangents out of the cards.
