@@ -9,7 +9,7 @@ universal-weave = { version = "0.4.1", features = [
 	"serde",
 	"loro",
 ] }
-universal-weave-ui = { git = "https://github.com/transkatgirl/universal-weave-ui.git" }
+universal-weave-layout = { git = "https://github.com/transkatgirl/universal-weave-layout.git" }
 eframe = "0.35"
 rfd = "0.17"
 rkyv = { version = "0.8.17", features = [

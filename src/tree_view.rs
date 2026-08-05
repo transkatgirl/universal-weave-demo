@@ -8,12 +8,10 @@ use eframe::egui::{
     epaint::CubicBezierShape,
 };
 use universal_weave::{Node, hashbrown};
-use universal_weave_ui::{
+use universal_weave_layout::{
+    self, Direction, LayoutConfig,
+    curve::{self, CubicBezier},
     glam::Vec2 as CurvePoint,
-    layout::{
-        self, Direction, LayoutConfig,
-        curve::{self, CubicBezier},
-    },
 };
 
 const NODE_W: f32 = 170.0;
@@ -107,7 +105,7 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         .filter(|node| node.parents.iter().all(|parent| !ids.contains(parent)))
         .map(|node| node.id)
         .collect();
-    let computed = layout::compute::<u64, LayoutNode, (), RandomState>(
+    let computed = universal_weave_layout::compute::<u64, LayoutNode, (), RandomState>(
         &graph,
         roots.iter(),
         &LayoutConfig {
