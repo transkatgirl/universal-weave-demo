@@ -1,7 +1,9 @@
 //! Custom-painted 3D cone visualization of the weave.
 //!
-//! [`universal_weave_layout::compute_3d`] arranges each rank on a circle around
-//! the `+y` axis, with the radius growing per rank into a cone. This module
+//! [`universal_weave_layout::compute_3d`] arranges the weave as a cone tree
+//! stacked along the `+y` axis: every node is the apex of its own cone, with
+//! its spanning-tree children spread over a circle one rank below it, sized so
+//! that sibling subtrees clear each other. This module
 //! projects that geometry to the screen in software and draws it with egui's
 //! ordinary 2D painter: node cards are billboards that always face the camera
 //! (so their text stays readable and hit-testing stays a rectangle test), and
@@ -16,23 +18,22 @@ use std::hash::RandomState;
 use eframe::egui::{
     self, Align2, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 };
-use universal_weave_layout::{
-    self, EdgeEndpoints, Layout3Config, NodeLayout3, curve, glam::Vec3,
-};
+use universal_weave_layout::{self, EdgeEndpoints, Layout3Config, NodeLayout3, curve, glam::Vec3};
 
 use crate::tree_view::{LayoutNode, TreeNode, TreeResponse, build_graph};
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
-/// Depth is passed through to the renderer and does not influence spacing.
+/// Cards are billboards with no real thickness. Depth enters the layout only
+/// through each node's horizontal footprint circle of radius
+/// `hypot(width, depth) / 2`, and a hair-thin depth keeps that circle at half
+/// the card's width — the widest a billboard can ever look from above.
 const NODE_D: f32 = 1.0;
+/// Minimum gap between the enclosing circles of sibling subtrees. The cone
+/// radii that keep it are emergent, so this is the only lever on how wide the
+/// cone opens.
 const NODE_SPACING: f32 = 30.0;
 const RANK_SPACING: f32 = 130.0;
-const RADIUS_GROWTH: f32 = 48.0;
-/// Arc-length width reserved around each long edge's bend points, so connectors
-/// crossing a rank get their own lane on its circle instead of grazing the
-/// cards there. Matches the 2D view's lane width.
-const EDGE_SPACING: f32 = 16.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
 /// a fraction of half the segment's axial span. `1.0` is the roundest.
 const CURVE_ROUNDNESS: f32 = 1.0;
@@ -146,7 +147,7 @@ impl View {
 }
 
 struct ConeLayout {
-    nodes: HashMap<u64, NodeLayout3>,
+    nodes: HashMap<u64, NodeLayout3<u64>>,
     /// Edge polylines keyed by `(parent, child)`, already flattened from the
     /// smoothed Bézier path into line segments.
     edges: HashMap<(u64, u64), Vec<Vec3>>,
@@ -172,8 +173,6 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
         &Layout3Config {
             node_spacing: NODE_SPACING,
             rank_spacing: RANK_SPACING,
-            radius_growth: RADIUS_GROWTH,
-            edge_spacing: EDGE_SPACING,
             // As in the 2D view, routes start and end on the facing card
             // borders; the billboards cover the joints either way, but ending
             // at the border keeps the curve's tangents out of the cards.
@@ -591,13 +590,27 @@ mod tests {
         assert_eq!(placement(1).position.y, placement(2).position.y);
         assert!(placement(3).position.y < 0.0);
 
-        // Siblings share a circle but sit at different angles on it.
+        // The lone root hangs off the invisible apex on the central axis.
+        assert_eq!(placement(0).parent, None);
+        assert_eq!(placement(0).radius, 0.0);
+        assert_eq!(placement(0).position.x, 0.0);
+        assert_eq!(placement(0).position.z, 0.0);
+
+        // Siblings share their parent's children circle, which has to open
+        // wide enough to separate them, but sit at different angles on it.
+        assert_eq!(placement(1).parent, Some(0));
+        assert_eq!(placement(2).parent, Some(0));
         assert_eq!(placement(1).radius, placement(2).radius);
+        assert!(placement(1).radius > 0.0);
         assert_ne!(placement(1).angle, placement(2).angle);
 
-        // The cone widens with depth.
-        assert!(placement(0).radius < placement(1).radius);
-        assert!(placement(1).radius < placement(3).radius);
+        // `radius` measures the distance to the spanning-tree parent, not to
+        // the axis: node 3's second parent is a non-tree edge, so it is an only
+        // child and sits directly under node 1 rather than further out.
+        assert_eq!(placement(3).parent, Some(1));
+        assert_eq!(placement(3).radius, 0.0);
+        assert_eq!(placement(3).position.x, placement(1).position.x);
+        assert_eq!(placement(3).position.z, placement(1).position.z);
 
         for edge in [(0, 1), (0, 2), (1, 3), (2, 3)] {
             let polyline = layout
