@@ -45,7 +45,7 @@ struct TreeLayout {
 }
 
 /// Minimal weave node used to adapt the renderer's snapshot to the layout crate.
-struct LayoutNode {
+pub(crate) struct LayoutNode {
     id: u64,
     children: Vec<u64>,
 }
@@ -75,8 +75,14 @@ impl Node<u64, ()> for LayoutNode {
     }
 }
 
-/// Computes a left-to-right Sugiyama layout and connector routes.
-fn layout(ordered: &[TreeNode]) -> TreeLayout {
+/// Adapts the renderer's snapshot to the layout crate, inverting parent links
+/// into children and deriving the root set.
+///
+/// Returns the graph alongside the identifiers of nodes whose parents all fall
+/// outside the snapshot.
+pub(crate) fn build_graph(
+    ordered: &[TreeNode],
+) -> (hashbrown::HashMap<u64, LayoutNode, RandomState>, Vec<u64>) {
     let ids: HashSet<u64> = ordered.iter().map(|node| node.id).collect();
     let mut graph = hashbrown::HashMap::with_capacity_and_hasher(ordered.len(), RandomState::new());
 
@@ -105,6 +111,13 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         .filter(|node| node.parents.iter().all(|parent| !ids.contains(parent)))
         .map(|node| node.id)
         .collect();
+
+    (graph, roots)
+}
+
+/// Computes a left-to-right Sugiyama layout and connector routes.
+fn layout(ordered: &[TreeNode]) -> TreeLayout {
+    let (graph, roots) = build_graph(ordered);
     let computed = universal_weave_layout::compute::<u64, LayoutNode, (), RandomState>(
         &graph,
         roots.iter(),
