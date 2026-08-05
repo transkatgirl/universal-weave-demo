@@ -18,9 +18,7 @@ const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
 const X_GAP: f32 = 80.0;
 const Y_GAP: f32 = 30.0;
-/// Within-rank width reserved for each long edge crossing a rank, so
-/// connectors passing a band get their own lane instead of grazing the cards.
-const EDGE_GAP: f32 = 16.0;
+const EDGE_GAP: f32 = 20.0;
 const MARGIN: f32 = 30.0;
 /// The rank axis the layout advances along, shared by the layout config and
 /// the edge smoother so the two cannot drift apart.
@@ -132,7 +130,8 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         &LayoutConfig {
             node_spacing: Y_GAP,
             rank_spacing: X_GAP,
-            edge_spacing: EDGE_GAP,
+            dummy_spacing: Some(EDGE_GAP),
+            edge_spacing: EDGE_GAP / 2.0,
             // Routes already start and end on the facing card borders, so the
             // smoothed curve is exactly the visible connector.
             endpoints: EdgeEndpoints::Border,
