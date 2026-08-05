@@ -131,10 +131,17 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         .edges
         .iter()
         .map(|(edge, points)| {
-            let points: Vec<CurvePoint> = points
+            let mut points: Vec<CurvePoint> = points
                 .iter()
                 .map(|point| *point + CurvePoint::splat(MARGIN))
                 .collect();
+
+            // Layout routes edges between node centers. Clip those endpoints to
+            // the facing sides of the cards before fitting the visible curve.
+            points[0].x += NODE_W / 2.0;
+            let last = points.len() - 1;
+            points[last].x -= NODE_W / 2.0;
+
             let curves = curve::fit_with_tangents(
                 &points,
                 CurvePoint::X,
@@ -341,10 +348,13 @@ mod tests {
 
             let source = layout.positions[&edge.0];
             let target = layout.positions[&edge.1];
-            assert_eq!(curves[0].start, CurvePoint::new(source.x, source.y));
+            assert_eq!(
+                curves[0].start,
+                CurvePoint::new(source.x + NODE_W / 2.0, source.y)
+            );
             assert_eq!(
                 curves[curves.len() - 1].end,
-                CurvePoint::new(target.x, target.y)
+                CurvePoint::new(target.x - NODE_W / 2.0, target.y)
             );
             for segments in curves.windows(2) {
                 assert_eq!(segments[0].end, segments[1].start);
