@@ -1,16 +1,27 @@
 //! Custom-painted tree/DAG visualization for the weave.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::RandomState;
 
-use dagre::graph::Graph;
-use dagre::{EdgeLabel, LayoutOptions, NodeLabel, RankDir};
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
+    epaint::CubicBezierShape,
+};
+use universal_weave::{Node, hashbrown};
+use universal_weave_ui::{
+    glam::Vec2 as CurvePoint,
+    layout::{
+        self, Direction, LayoutConfig,
+        curve::{self, CubicBezier},
+    },
+};
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
 const X_GAP: f32 = 80.0;
 const Y_GAP: f32 = 30.0;
 const MARGIN: f32 = 30.0;
+const CURVE_FIT_TOLERANCE: f32 = 2.0;
 
 /// A weave-agnostic snapshot of a node, used for rendering.
 pub struct TreeNode {
@@ -31,80 +42,116 @@ pub struct TreeResponse {
 
 struct TreeLayout {
     positions: HashMap<u64, Pos2>,
-    edge_paths: HashMap<(u64, u64), Vec<Pos2>>,
+    edge_curves: HashMap<(u64, u64), Vec<CubicBezier<CurvePoint>>>,
+    size: Vec2,
 }
 
-/// Computes a left-to-right Sugiyama layout and connector routes with Dagre.
+/// Minimal weave node used to adapt the renderer's snapshot to the layout crate.
+struct LayoutNode {
+    id: u64,
+    children: Vec<u64>,
+}
+
+impl Node<u64, ()> for LayoutNode {
+    type From = ();
+    type To = Vec<u64>;
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn from(&self) -> &Self::From {
+        &()
+    }
+
+    fn to(&self) -> &Self::To {
+        &self.children
+    }
+
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    fn contents(&self) -> &() {
+        &()
+    }
+}
+
+/// Computes a left-to-right Sugiyama layout and connector routes.
 fn layout(ordered: &[TreeNode]) -> TreeLayout {
     let ids: HashSet<u64> = ordered.iter().map(|node| node.id).collect();
-    let mut graph = Graph::<NodeLabel, EdgeLabel>::new();
+    let mut graph = hashbrown::HashMap::with_capacity_and_hasher(ordered.len(), RandomState::new());
 
     for node in ordered {
-        graph.set_node(
-            node.id.to_string(),
-            Some(NodeLabel {
-                width: f64::from(NODE_W),
-                height: f64::from(NODE_H),
-                ..NodeLabel::default()
-            }),
+        graph.insert(
+            node.id,
+            LayoutNode {
+                id: node.id,
+                children: Vec::new(),
+            },
         );
     }
 
     for node in ordered {
         for parent in node.parents.iter().filter(|parent| ids.contains(parent)) {
-            graph.set_edge(
-                parent.to_string(),
-                node.id.to_string(),
-                Some(EdgeLabel {
-                    minlen: 1,
-                    weight: 1,
-                    ..EdgeLabel::default()
-                }),
-                None,
-            );
+            graph
+                .get_mut(parent)
+                .expect("parent was checked against the node set")
+                .children
+                .push(node.id);
         }
     }
 
-    dagre::layout(
-        &mut graph,
-        Some(LayoutOptions {
-            rankdir: RankDir::LR,
-            align: Some(dagre::Align::UL),
-            nodesep: f64::from(Y_GAP),
-            ranksep: f64::from(X_GAP),
-            marginx: f64::from(MARGIN),
-            marginy: f64::from(MARGIN),
-            ..LayoutOptions::default()
-        }),
+    let roots: Vec<u64> = ordered
+        .iter()
+        .filter(|node| node.parents.iter().all(|parent| !ids.contains(parent)))
+        .map(|node| node.id)
+        .collect();
+    let computed = layout::compute::<u64, LayoutNode, (), RandomState>(
+        &graph,
+        roots.iter(),
+        &LayoutConfig {
+            node_spacing: Y_GAP,
+            rank_spacing: X_GAP,
+            direction: Direction::LeftToRight,
+        },
+        |_| [NODE_W, NODE_H].into(),
     );
 
-    let positions = ordered
+    let positions = computed
+        .nodes
         .iter()
-        .filter_map(|node| {
-            let label = graph.node(&node.id.to_string())?;
-            Some((node.id, Pos2::new(label.x? as f32, label.y? as f32)))
+        .map(|(id, node)| {
+            let center = node.position + node.size / 2.0;
+            (*id, Pos2::new(center.x + MARGIN, center.y + MARGIN))
         })
         .collect();
 
-    let mut edge_paths = HashMap::new();
-    for node in ordered {
-        for parent in node.parents.iter().filter(|parent| ids.contains(parent)) {
-            let Some(edge) = graph.edge(&parent.to_string(), &node.id.to_string(), None) else {
-                continue;
-            };
-            edge_paths.insert(
-                (*parent, node.id),
-                edge.points
-                    .iter()
-                    .map(|point| Pos2::new(point.x as f32, point.y as f32))
-                    .collect(),
+    let edge_curves = computed
+        .edges
+        .iter()
+        .map(|(edge, points)| {
+            let points: Vec<CurvePoint> = points
+                .iter()
+                .map(|point| *point + CurvePoint::splat(MARGIN))
+                .collect();
+            let curves = curve::fit_with_tangents(
+                &points,
+                CurvePoint::X,
+                CurvePoint::NEG_X,
+                CURVE_FIT_TOLERANCE,
             );
-        }
-    }
+            (*edge, curves)
+        })
+        .collect();
 
     TreeLayout {
         positions,
-        edge_paths,
+        edge_curves,
+        size: Vec2::new(
+            computed.size.x + MARGIN * 2.0,
+            computed.size.y + MARGIN * 2.0,
+        ),
     }
 }
 
@@ -138,31 +185,36 @@ pub fn show(
 
     let layout = layout(nodes);
 
-    let (mut max_x, mut max_y) = (0.0f32, 0.0f32);
-    for pos in layout.positions.values() {
-        max_x = max_x.max(pos.x);
-        max_y = max_y.max(pos.y);
-    }
-    let size = Vec2::new(max_x + NODE_W / 2.0 + MARGIN, max_y + NODE_H / 2.0 + MARGIN)
-        .max(ui.available_size());
+    let size = layout.size.max(ui.available_size());
 
     // Only sense clicks: drag events fall through to the surrounding ScrollArea,
     // which gives us drag-to-pan scrolling for free.
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let to_screen = |pos: Pos2| response.rect.min + pos.to_vec2();
+    let curve_to_screen = |point: CurvePoint| response.rect.min + Vec2::new(point.x, point.y);
 
     let visuals = ui.visuals();
     let edge_stroke = Stroke::new(1.5, visuals.weak_text_color());
 
-    // Dagre-routed edges, drawn first so nodes sit on top. In a DAG a node gets
+    // Routed edges, drawn first so nodes sit on top. In a DAG a node gets
     // one edge from each of its parents.
     for node in nodes {
         for parent in &node.parents {
-            let Some(points) = layout.edge_paths.get(&(*parent, node.id)) else {
+            let Some(curves) = layout.edge_curves.get(&(*parent, node.id)) else {
                 continue;
             };
-            for segment in points.windows(2) {
-                painter.line_segment([to_screen(segment[0]), to_screen(segment[1])], edge_stroke);
+            for curve in curves {
+                painter.add(CubicBezierShape::from_points_stroke(
+                    [
+                        curve_to_screen(curve.start),
+                        curve_to_screen(curve.start_control),
+                        curve_to_screen(curve.end_control),
+                        curve_to_screen(curve.end),
+                    ],
+                    false,
+                    Color32::TRANSPARENT,
+                    edge_stroke,
+                ));
             }
         }
     }
@@ -268,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn dagre_lays_out_and_routes_a_diamond() {
+    fn universal_weave_ui_lays_out_and_curves_a_diamond() {
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0]), node(3, &[1, 2])];
 
         let layout = layout(&nodes);
@@ -281,13 +333,22 @@ mod tests {
         assert_ne!(layout.positions[&1].y, layout.positions[&2].y);
 
         for edge in [(0, 1), (0, 2), (1, 3), (2, 3)] {
-            assert!(
-                layout
-                    .edge_paths
-                    .get(&edge)
-                    .is_some_and(|path| path.len() >= 2),
-                "edge {edge:?} did not get a Dagre route"
+            let curves = layout
+                .edge_curves
+                .get(&edge)
+                .unwrap_or_else(|| panic!("edge {edge:?} did not get a curve"));
+            assert!(!curves.is_empty());
+
+            let source = layout.positions[&edge.0];
+            let target = layout.positions[&edge.1];
+            assert_eq!(curves[0].start, CurvePoint::new(source.x, source.y));
+            assert_eq!(
+                curves[curves.len() - 1].end,
+                CurvePoint::new(target.x, target.y)
             );
+            for segments in curves.windows(2) {
+                assert_eq!(segments[0].end, segments[1].start);
+            }
         }
     }
 }

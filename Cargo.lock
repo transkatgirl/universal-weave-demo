@@ -816,17 +816,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
-name = "dagre"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9468ae6a4b98e7102e0e59ba8f9aacd2266cec71817c19b62b2d61ee260524c1"
-dependencies = [
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1482,6 +1471,15 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
+]
+
+[[package]]
+name = "glam"
+version = "0.33.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360bd2cd76e0cd9032d42cf2922155cecea2685b0cfa4630c3246df030bcfd6"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -4220,9 +4218,9 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "universal-weave"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b098c31813cfee23dac398ea0857b71a7d7d3430897ac654207c7a85e32d4ab1"
+checksum = "73d3e16ddf00e9b597111a05c2c7e0738646fac49f98784da64f761fe8879eeb"
 dependencies = [
  "contracts",
  "hashbrown 0.17.1",
@@ -4237,10 +4235,19 @@ dependencies = [
 name = "universal-weave-demo"
 version = "0.1.0"
 dependencies = [
- "dagre",
  "eframe",
  "rfd",
  "rkyv",
+ "universal-weave",
+ "universal-weave-ui",
+]
+
+[[package]]
+name = "universal-weave-ui"
+version = "0.1.0"
+source = "git+https://github.com/transkatgirl/universal-weave-ui.git#985d7e9d457a0a8eee6a1c3ba21d093d45557f2c"
+dependencies = [
+ "glam",
  "universal-weave",
 ]
 
