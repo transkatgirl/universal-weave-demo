@@ -9,7 +9,7 @@ use eframe::egui::{
 };
 use universal_weave::{Node, hashbrown};
 use universal_weave_layout::{
-    self, Direction, LayoutConfig,
+    self, Direction, EdgeEndpoints, LayoutConfig,
     curve::{self, CubicBezier},
     glam::Vec2 as CurvePoint,
 };
@@ -18,6 +18,9 @@ const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
 const X_GAP: f32 = 80.0;
 const Y_GAP: f32 = 30.0;
+/// Within-rank width reserved for each long edge crossing a rank, so
+/// connectors passing a band get their own lane instead of grazing the cards.
+const EDGE_GAP: f32 = 16.0;
 const MARGIN: f32 = 30.0;
 const CURVE_FIT_TOLERANCE: f32 = 2.0;
 
@@ -124,6 +127,10 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         &LayoutConfig {
             node_spacing: Y_GAP,
             rank_spacing: X_GAP,
+            edge_spacing: EDGE_GAP,
+            // Routes already start and end on the facing card borders, so the
+            // fitted curve is exactly the visible connector.
+            endpoints: EdgeEndpoints::Border,
             direction: Direction::LeftToRight,
         },
         |_| [NODE_W, NODE_H].into(),
@@ -142,17 +149,14 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
         .edges
         .iter()
         .map(|(edge, points)| {
-            let mut points: Vec<CurvePoint> = points
+            let points: Vec<CurvePoint> = points
                 .iter()
                 .map(|point| *point + CurvePoint::splat(MARGIN))
                 .collect();
 
-            // Layout routes edges between node centers. Clip those endpoints to
-            // the facing sides of the cards before fitting the visible curve.
-            points[0].x += NODE_W / 2.0;
-            let last = points.len() - 1;
-            points[last].x -= NODE_W / 2.0;
-
+            // Routes leave and enter along the rank axis, but the stub carrying
+            // that direction is dropped at a band's tallest node, so the
+            // tangents are pinned rather than estimated.
             let curves = curve::fit_with_tangents(
                 &points,
                 CurvePoint::X,
@@ -338,7 +342,32 @@ mod tests {
     }
 
     #[test]
-    fn universal_weave_ui_lays_out_and_curves_a_diamond() {
+    fn long_edges_route_around_the_ranks_they_cross() {
+        // 0 -> 2 skips rank 1, so the layout routes it through a reserved
+        // corridor rather than straight through node 1's card.
+        let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0, 1])];
+
+        let layout = layout(&nodes);
+
+        let skipped = Rect::from_center_size(layout.positions[&1], Vec2::new(NODE_W, NODE_H));
+        let curves = layout
+            .edge_curves
+            .get(&(0, 2))
+            .expect("the skipping edge got a curve");
+
+        for curve in curves {
+            for step in 0..=32 {
+                let point = curve.position(step as f32 / 32.0);
+                assert!(
+                    !skipped.contains(Pos2::new(point.x, point.y)),
+                    "edge 0 -> 2 passes through the card it skips"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_lays_out_and_curves_a_diamond() {
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0]), node(3, &[1, 2])];
 
         let layout = layout(&nodes);
@@ -357,6 +386,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("edge {edge:?} did not get a curve"));
             assert!(!curves.is_empty());
 
+            // `EdgeEndpoints::Border` lands the route on the facing sides of
+            // the cards, so the curve needs no clipping to be the connector.
             let source = layout.positions[&edge.0];
             let target = layout.positions[&edge.1];
             assert_eq!(

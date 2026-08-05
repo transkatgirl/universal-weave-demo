@@ -4245,7 +4245,7 @@ dependencies = [
 [[package]]
 name = "universal-weave-layout"
 version = "0.1.0"
-source = "git+https://github.com/transkatgirl/universal-weave-layout.git#e631b472c7d834a38c15328c51c032aac8515072"
+source = "git+https://github.com/transkatgirl/universal-weave-layout.git#a53eba93aacfbb15cde3a32271aa40cbd3fb1797"
 dependencies = [
  "glam",
  "universal-weave",
