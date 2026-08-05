@@ -22,7 +22,12 @@ const Y_GAP: f32 = 30.0;
 /// connectors passing a band get their own lane instead of grazing the cards.
 const EDGE_GAP: f32 = 16.0;
 const MARGIN: f32 = 30.0;
-const CURVE_FIT_TOLERANCE: f32 = 2.0;
+/// The rank axis the layout advances along, shared by the layout config and
+/// the edge smoother so the two cannot drift apart.
+const DIRECTION: Direction = Direction::LeftToRight;
+/// How far the smoothed connectors' control arms reach along the rank axis, as
+/// a fraction of half the segment's axial span. `1.0` is the roundest.
+const CURVE_ROUNDNESS: f32 = 1.0;
 
 /// A weave-agnostic snapshot of a node, used for rendering.
 pub struct TreeNode {
@@ -129,9 +134,9 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
             rank_spacing: X_GAP,
             edge_spacing: EDGE_GAP,
             // Routes already start and end on the facing card borders, so the
-            // fitted curve is exactly the visible connector.
+            // smoothed curve is exactly the visible connector.
             endpoints: EdgeEndpoints::Border,
-            direction: Direction::LeftToRight,
+            direction: DIRECTION,
         },
         |_| [NODE_W, NODE_H].into(),
     );
@@ -154,15 +159,12 @@ fn layout(ordered: &[TreeNode]) -> TreeLayout {
                 .map(|point| *point + CurvePoint::splat(MARGIN))
                 .collect();
 
-            // Routes leave and enter along the rank axis, but the stub carrying
-            // that direction is dropped at a band's tallest node, so the
-            // tangents are pinned rather than estimated.
-            let curves = curve::fit_with_tangents(
-                &points,
-                CurvePoint::X,
-                CurvePoint::NEG_X,
-                CURVE_FIT_TOLERANCE,
-            );
+            // `smooth` builds one cubic per route segment with every tangent on
+            // the rank axis, so connectors leave and enter cards horizontally
+            // without pinning endpoint tangents by hand, and each segment
+            // provably stays inside its endpoints' box — the corridors the
+            // layout reserved are enough to keep the curves off the cards.
+            let curves = curve::smooth(&points, DIRECTION.rank_axis(), CURVE_ROUNDNESS);
             (*edge, curves)
         })
         .collect();

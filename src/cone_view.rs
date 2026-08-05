@@ -33,7 +33,9 @@ const RADIUS_GROWTH: f32 = 48.0;
 /// crossing a rank get their own lane on its circle instead of grazing the
 /// cards there. Matches the 2D view's lane width.
 const EDGE_SPACING: f32 = 16.0;
-const CURVE_FIT_TOLERANCE: f32 = 2.0;
+/// How far the smoothed connectors' control arms reach along the rank axis, as
+/// a fraction of half the segment's axial span. `1.0` is the roundest.
+const CURVE_ROUNDNESS: f32 = 1.0;
 const FLATTEN_TOLERANCE: f32 = 1.0;
 
 const FOV_Y: f32 = FRAC_PI_4;
@@ -146,7 +148,7 @@ impl View {
 struct ConeLayout {
     nodes: HashMap<u64, NodeLayout3>,
     /// Edge polylines keyed by `(parent, child)`, already flattened from the
-    /// fitted Bézier path into line segments.
+    /// smoothed Bézier path into line segments.
     edges: HashMap<(u64, u64), Vec<Vec3>>,
     size: Vec3,
 }
@@ -190,15 +192,15 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
         })
         .collect();
 
-    // Fit and flatten in the layout's own space, where ranks advance along +y,
-    // so the endpoint tangents follow the rank axis; the reflection is applied
+    // Smooth and flatten in the layout's own space, where ranks advance along
+    // +y, so `smooth` gets the rank axis it expects; the reflection is applied
     // to the resulting points. The endpoints sit on the cards' `y` borders,
     // which the billboards cover once the geometry is projected.
     let edges = computed
         .edges
         .iter()
         .map(|(edge, points)| {
-            let path = curve::fit_with_tangents(points, Vec3::Y, Vec3::NEG_Y, CURVE_FIT_TOLERANCE);
+            let path = curve::smooth(points, Vec3::Y, CURVE_ROUNDNESS);
             let polyline = curve::flatten_path(&path, FLATTEN_TOLERANCE)
                 .into_iter()
                 .map(upright)
