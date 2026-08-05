@@ -36,7 +36,7 @@ const NODE_SPACING: f32 = 30.0;
 /// Minimum gap kept around the corridor an edge skipping ranks reserves on its
 /// source's children circle. As in the 2D view the corridors themselves are
 /// widthless, so this is what holds the connectors off the cards they pass.
-const EDGE_GAP: f32 = 20.0;
+const EDGE_GAP: f32 = 0.0;
 const RANK_SPACING: f32 = 130.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
 /// a fraction of half the segment's axial span. `1.0` is the roundest.
