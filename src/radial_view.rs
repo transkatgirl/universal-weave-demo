@@ -38,10 +38,7 @@ const NODE_D: f32 = 0.0;
 /// each rank's is whatever makes the rank exactly fill its circumference — so
 /// this is the only lever on how far the rings open.
 const NODE_SPACING: f32 = 30.0;
-/// Minimum arc-length gap kept around the corridor an edge skipping ranks
-/// reserves on each ring it crosses. As in the 2D view the corridors
-/// themselves are widthless, so this is the only margin between a connector
-/// and the cards it passes; zero lets it run along their borders.
+const EDGE_SPACING: f32 = 15.0;
 const EDGE_GAP: f32 = 0.0;
 const RANK_SPACING: f32 = 130.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
@@ -187,7 +184,7 @@ fn layout(ordered: &[TreeNode]) -> RadialLayout {
             // Connectors are thin lines, so their corridors need no arc width
             // of their own; reserving the position is what keeps the bend
             // points out of the cards, and `dummy_spacing` sets the margin.
-            edge_spacing: 0.0,
+            edge_spacing: EDGE_SPACING,
             dummy_spacing: Some(EDGE_GAP),
             // As in the 2D view, routes start and end on the facing card
             // borders; the billboards cover the joints either way, but ending
