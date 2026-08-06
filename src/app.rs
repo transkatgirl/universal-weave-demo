@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use eframe::egui::{self, Color32, RichText};
 
 use crate::document::{Document, SyncOutcome, WeaveKind, seeded_dependent, synchronize_pair};
-use crate::{cone_view, persistence, tree_view};
+use crate::{persistence, radial_view, tree_view};
 
 const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
 
@@ -14,14 +14,14 @@ const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
 enum ViewMode {
     #[default]
     Tree2D,
-    Cone3D,
+    Radial3D,
 }
 
 impl ViewMode {
     fn label(self) -> &'static str {
         match self {
             Self::Tree2D => "2D tree",
-            Self::Cone3D => "3D cone",
+            Self::Radial3D => "3D radial",
         }
     }
 }
@@ -47,7 +47,7 @@ struct EditorState {
     move_buffer: String,
     status: String,
     view_mode: ViewMode,
-    camera: cone_view::Camera,
+    camera: radial_view::Camera,
 }
 
 impl EditorState {
@@ -66,7 +66,7 @@ impl EditorState {
             move_buffer: String::new(),
             status,
             view_mode: ViewMode::default(),
-            camera: cone_view::Camera::default(),
+            camera: radial_view::Camera::default(),
         }
     }
 
@@ -256,10 +256,10 @@ impl EditorState {
 
                 ui.separator();
                 ui.label("View:");
-                for mode in [ViewMode::Tree2D, ViewMode::Cone3D] {
+                for mode in [ViewMode::Tree2D, ViewMode::Radial3D] {
                     ui.selectable_value(&mut self.view_mode, mode, mode.label());
                 }
-                if self.view_mode == ViewMode::Cone3D && ui.button("Reset view").clicked() {
+                if self.view_mode == ViewMode::Radial3D && ui.button("Reset view").clicked() {
                     self.camera.reset();
                 }
 
@@ -530,9 +530,9 @@ impl EditorState {
                         })
                         .inner
                 }
-                // The cone view senses drags for orbiting, so it gets the panel
+                // The radial view senses drags for orbiting, so it gets the panel
                 // to itself rather than sitting inside a ScrollArea.
-                ViewMode::Cone3D => cone_view::show(ui, &nodes, selected, &active, &path, camera),
+                ViewMode::Radial3D => radial_view::show(ui, &nodes, selected, &active, &path, camera),
             })
             .inner;
 

@@ -1,15 +1,20 @@
-//! Custom-painted 3D cone visualization of the weave.
+//! Custom-painted 3D radial visualization of the weave.
 //!
-//! [`universal_weave_layout::compute_3d`] arranges the weave as a cone tree
-//! stacked along the `+y` axis: every node is the apex of its own cone, with
-//! its spanning-tree children spread over a circle one rank below it, sized so
-//! that sibling subtrees clear each other. This module
-//! projects that geometry to the screen in software and draws it with egui's
-//! ordinary 2D painter: node cards are billboards that always face the camera
-//! (so their text stays readable and hit-testing stays a rectangle test), and
-//! edges are flattened into screen-space line segments. Cards and edge segments
-//! share one depth-sorted draw list, so connectors correctly weave in front of
-//! and behind the cards they pass.
+//! [`universal_weave_layout::compute_3d`] arranges the weave as a stack of
+//! rank circles around the `+y` axis: every rank becomes one ring whose radius
+//! is emergent, sized so that the rank's cards exactly fill its circumference
+//! with a single seam gap, so sparse ranks hug the axis and dense ranks open
+//! out. This module projects that geometry to the screen in software and draws
+//! it with egui's ordinary 2D painter: node cards are billboards that always
+//! face the camera (so their text stays readable and hit-testing stays a
+//! rectangle test), and edges are flattened into screen-space line segments.
+//! Cards and edge segments share one depth-sorted draw list, so connectors
+//! correctly weave in front of and behind the cards they pass.
+//!
+//! Because the cards are billboards rather than tangents to their ring, a ring
+//! whose radius is small relative to the card width projects its cards on top
+//! of one another; the depth sort keeps the nearer card whole, and orbiting
+//! separates them.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
@@ -24,18 +29,19 @@ use crate::tree_view::{LayoutNode, TreeNode, TreeResponse, build_graph};
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
-/// Cards are billboards with no real thickness. Depth enters the layout only
-/// through each node's horizontal footprint circle of radius
-/// `hypot(width, depth) / 2`, and a hair-thin depth keeps that circle at half
-/// the card's width — the widest a billboard can ever look from above.
-const NODE_D: f32 = 1.0;
-/// Minimum gap between the enclosing circles of sibling subtrees. The cone
-/// radii that keep it are emergent, so this is the only lever on how wide the
-/// cone opens.
+/// Cards are billboards with no real thickness. Depth no longer enters the
+/// layout at all — the width alone is the card's circumferential footprint —
+/// so it is only passed through for the renderer, which does not use it.
+const NODE_D: f32 = 0.0;
+/// Minimum arc-length gap between the borders of adjacent cards on a ring, the
+/// seam between the first and last card included. Ring radii are emergent —
+/// each rank's is whatever makes the rank exactly fill its circumference — so
+/// this is the only lever on how far the rings open.
 const NODE_SPACING: f32 = 30.0;
-/// Minimum gap kept around the corridor an edge skipping ranks reserves on its
-/// source's children circle. As in the 2D view the corridors themselves are
-/// widthless, so this is what holds the connectors off the cards they pass.
+/// Minimum arc-length gap kept around the corridor an edge skipping ranks
+/// reserves on each ring it crosses. As in the 2D view the corridors
+/// themselves are widthless, so this is the only margin between a connector
+/// and the cards it passes; zero lets it run along their borders.
 const EDGE_GAP: f32 = 0.0;
 const RANK_SPACING: f32 = 130.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
@@ -53,8 +59,9 @@ const ORBIT_SPEED: f32 = 0.008;
 const ZOOM_SPEED: f32 = 0.0015;
 const MIN_DISTANCE: f32 = 60.0;
 const MAX_DISTANCE: f32 = 200_000.0;
-/// The bounding sphere frames the box diagonal, which leaves a wide margin on
-/// the axis the cone is narrowest along; pull the camera in to compensate.
+/// The bounding sphere frames the box diagonal, but the geometry inside that
+/// box is a stack of rings rather than a solid, so the framing leaves a wide
+/// margin; pull the camera in to compensate.
 const FIT_MARGIN: f32 = 0.8;
 /// Labels stop shrinking with the cards at this point size, so distant nodes
 /// stay readable; the text is truncated to whatever still fits instead.
@@ -62,7 +69,7 @@ const MIN_LABEL_PT: f32 = 7.5;
 /// How far the most distant geometry is faded toward the panel background.
 const FADE_STRENGTH: f32 = 0.75;
 
-/// An orbit camera looking at a point on the cone axis.
+/// An orbit camera looking at a point on the rank axis.
 pub struct Camera {
     yaw: f32,
     pitch: f32,
@@ -150,8 +157,8 @@ impl View {
     }
 }
 
-struct ConeLayout {
-    nodes: HashMap<u64, NodeLayout3<u64>>,
+struct RadialLayout {
+    nodes: HashMap<u64, NodeLayout3>,
     /// Edge polylines keyed by `(parent, child)`, already flattened from the
     /// smoothed Bézier path into line segments.
     edges: HashMap<(u64, u64), Vec<Vec3>>,
@@ -161,15 +168,15 @@ struct ConeLayout {
 /// Reflects a layout point onto the rendering axis.
 ///
 /// The layout stacks ranks along `+y` with the roots at `y = 0`, which would
-/// stand the cone on its point with the roots underneath. Negating `y` hangs it
-/// the way a tree reads instead: roots at the top, widening downwards, matching
-/// the 2D view's root-first ordering.
+/// put the roots underneath. Negating `y` hangs the stack the way a tree reads
+/// instead: roots at the top, later ranks below them, matching the 2D view's
+/// root-first ordering.
 fn upright(point: Vec3) -> Vec3 {
     Vec3::new(point.x, -point.y, point.z)
 }
 
-/// Computes the radial cone layout and its smoothed connector routes.
-fn layout(ordered: &[TreeNode]) -> ConeLayout {
+/// Computes the radial layered layout and its smoothed connector routes.
+fn layout(ordered: &[TreeNode]) -> RadialLayout {
     let (graph, roots) = build_graph(ordered);
     let computed = universal_weave_layout::compute_3d::<u64, LayoutNode, (), RandomState>(
         &graph,
@@ -177,9 +184,9 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
         &Layout3Config {
             node_spacing: NODE_SPACING,
             rank_spacing: RANK_SPACING,
-            // Connectors are thin lines, so their corridors need no width of
-            // their own; reserving the position is what keeps the waypoints
-            // clear of each rank's cards, and `dummy_spacing` sets the margin.
+            // Connectors are thin lines, so their corridors need no arc width
+            // of their own; reserving the position is what keeps the bend
+            // points out of the cards, and `dummy_spacing` sets the margin.
             edge_spacing: 0.0,
             dummy_spacing: Some(EDGE_GAP),
             // As in the 2D view, routes start and end on the facing card
@@ -217,7 +224,7 @@ fn layout(ordered: &[TreeNode]) -> ConeLayout {
         })
         .collect();
 
-    ConeLayout {
+    RadialLayout {
         nodes,
         edges,
         size: computed.size,
@@ -244,7 +251,7 @@ enum Item {
     },
 }
 
-/// The handful of theme colors the cone view paints with.
+/// The handful of theme colors the radial view paints with.
 struct Palette {
     background: Color32,
     edge: Color32,
@@ -305,7 +312,7 @@ fn interact(ui: &egui::Ui, response: &egui::Response, camera: &mut Camera) {
 }
 
 /// Projects the layout into a depth-sorted draw list, farthest primitive first.
-fn build_draws(nodes: &[TreeNode], layout: &ConeLayout, view: &View) -> Vec<Draw> {
+fn build_draws(nodes: &[TreeNode], layout: &RadialLayout, view: &View) -> Vec<Draw> {
     let mut draws = Vec::new();
 
     for node in nodes {
@@ -463,7 +470,8 @@ fn node_at(draws: &[Draw], nodes: &[TreeNode], point: Pos2) -> Option<u64> {
     })
 }
 
-/// Renders the weave as a cone into the current `ui`, orbiting `camera`.
+/// Renders the weave as a stack of rings into the current `ui`, orbiting
+/// `camera`.
 ///
 /// Takes the whole available space and senses drags, so it must not be placed
 /// inside a `ScrollArea`. `active` and `path` carry the same meaning as in
@@ -578,8 +586,13 @@ mod tests {
         [node(0, &[]), node(1, &[0]), node(2, &[0]), node(3, &[1, 2])]
     }
 
+    /// The horizontal distance of a placed card from the rank axis.
+    fn radius_of(point: Vec3) -> f32 {
+        point.x.hypot(point.z)
+    }
+
     #[test]
-    fn cone_layout_hangs_ranks_below_the_root() {
+    fn radial_layout_hangs_ranks_below_the_root() {
         let nodes = diamond();
 
         let layout = layout(&nodes);
@@ -599,27 +612,24 @@ mod tests {
         assert_eq!(placement(1).position.y, placement(2).position.y);
         assert!(placement(3).position.y < 0.0);
 
-        // The lone root hangs off the invisible apex on the central axis.
-        assert_eq!(placement(0).parent, None);
-        assert_eq!(placement(0).radius, 0.0);
-        assert_eq!(placement(0).position.x, 0.0);
-        assert_eq!(placement(0).position.z, 0.0);
+        // Every rank is a ring, so `radius` is the whole rank's, and even a
+        // lone root sits out on its own ring rather than on the axis.
+        for id in 0..4 {
+            let placed = placement(id);
+            assert!(placed.radius > 0.0);
+            assert!((radius_of(placed.position) - placed.radius).abs() < 0.01);
+        }
 
-        // Siblings share their parent's children circle, which has to open
-        // wide enough to separate them, but sit at different angles on it.
-        assert_eq!(placement(1).parent, Some(0));
-        assert_eq!(placement(2).parent, Some(0));
+        // Siblings share their rank's ring, which has to open wide enough to
+        // fit them both around it, but sit at different angles on it.
         assert_eq!(placement(1).radius, placement(2).radius);
-        assert!(placement(1).radius > 0.0);
         assert_ne!(placement(1).angle, placement(2).angle);
+        assert!(placement(1).radius > placement(0).radius);
 
-        // `radius` measures the distance to the spanning-tree parent, not to
-        // the axis: node 3's second parent is a non-tree edge, so it is an only
-        // child and sits directly under node 1 rather than further out.
-        assert_eq!(placement(3).parent, Some(1));
-        assert_eq!(placement(3).radius, 0.0);
-        assert_eq!(placement(3).position.x, placement(1).position.x);
-        assert_eq!(placement(3).position.z, placement(1).position.z);
+        // Ranks 0 and 2 hold one card of the same width, so their rings are
+        // the same size and their single cards line up angularly.
+        assert_eq!(placement(3).radius, placement(0).radius);
+        assert_eq!(placement(3).angle, placement(0).angle);
 
         for edge in [(0, 1), (0, 2), (1, 3), (2, 3)] {
             let polyline = layout

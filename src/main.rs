@@ -1,10 +1,10 @@
 //! A Loom-style demo application for the `universal-weave` library, built with eframe.
 
 mod app;
-mod cone_view;
 mod content;
 mod document;
 mod persistence;
+mod radial_view;
 mod tree_view;
 
 use app::DemoApp;
