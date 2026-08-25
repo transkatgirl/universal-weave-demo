@@ -14,7 +14,7 @@ use crate::content::{
     CollaborativeDemoWeave, DemoNode, DemoWeave, IndependentDemoNode, IndependentDemoWeave,
     TextContent,
 };
-use crate::tree_view::TreeNode;
+use crate::tree_view::{self, TreeLayout, TreeNode};
 
 /// The number of log entries shown in the action log panel.
 const MAX_SHOWN_ACTIONS: usize = 50;
@@ -274,6 +274,20 @@ impl Document {
         }
 
         nodes
+    }
+
+    /// Computes the geometry for the 2D view directly from the underlying
+    /// weave, preserving each implementation's topological ordering.
+    pub fn tree_layout(&mut self) -> TreeLayout {
+        match self {
+            Self::Dependent(weave) => tree_view::layout::<_, DemoNode, TextContent>(weave.as_mut()),
+            Self::Independent(weave) => {
+                tree_view::layout::<_, IndependentDemoNode, TextContent>(weave.as_mut())
+            }
+            Self::DependentLoro(weave) => {
+                tree_view::layout::<_, DemoNode, TextContent>(weave.as_mut())
+            }
+        }
     }
 
     /// The set of currently active nodes.

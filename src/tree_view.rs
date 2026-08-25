@@ -7,22 +7,24 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
     epaint::CubicBezierShape,
 };
-use universal_weave::{Node, hashbrown};
+use universal_weave::{
+    LayoutItem, Layouter, Node, Weave,
+    glam::Vec2 as LayoutPoint,
+    hashbrown,
+    layout::{Spacing, TopologicalLayouter},
+    tinyvec::ArrayVec,
+};
 use universal_weave_layout::{
-    self, Direction, EdgeEndpoints, LayoutConfig,
     curve::{self, CubicBezier},
     glam::Vec2 as CurvePoint,
 };
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
-const X_GAP: f32 = 80.0;
-const Y_GAP: f32 = 30.0;
+const LAYER_GAP: f32 = 80.0;
+const NODE_GAP: f32 = 30.0;
 const EDGE_GAP: f32 = 20.0;
 const MARGIN: f32 = 30.0;
-/// The rank axis the layout advances along, shared by the layout config and
-/// the edge smoother so the two cannot drift apart.
-const DIRECTION: Direction = Direction::LeftToRight;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
 /// a fraction of half the segment's axial span. `1.0` is the roundest.
 const CURVE_ROUNDNESS: f32 = 1.0;
@@ -44,7 +46,7 @@ pub struct TreeResponse {
     pub double_clicked: Option<u64>,
 }
 
-struct TreeLayout {
+pub(crate) struct TreeLayout {
     positions: HashMap<u64, Pos2>,
     edge_curves: HashMap<(u64, u64), Vec<CubicBezier<CurvePoint>>>,
     size: Vec2,
@@ -121,59 +123,84 @@ pub(crate) fn build_graph(
     (graph, roots)
 }
 
-/// Computes a left-to-right Sugiyama layout and connector routes.
-fn layout(ordered: &[TreeNode]) -> TreeLayout {
-    let (graph, roots) = build_graph(ordered);
-    let computed = universal_weave_layout::compute::<u64, LayoutNode, (), RandomState>(
-        &graph,
-        roots.iter(),
-        &LayoutConfig {
-            node_spacing: Y_GAP,
-            rank_spacing: X_GAP,
-            dummy_spacing: Some(EDGE_GAP),
-            edge_spacing: 0.0,
-            // Routes already start and end on the facing card borders, so the
-            // smoothed curve is exactly the visible connector.
-            endpoints: EdgeEndpoints::Border,
-            direction: DIRECTION,
-        },
-        |_| [NODE_W, NODE_H].into(),
+/// Computes a left-to-right layout and connector routes using universal-weave's
+/// general-purpose topological layouter.
+pub(crate) fn layout<W, N, T>(weave: &mut W) -> TreeLayout
+where
+    W: Weave<u64, N, T>,
+    N: Node<u64, T>,
+    for<'a> &'a N::From: IntoIterator<Item = &'a u64>,
+{
+    let mut layouter = TopologicalLayouter::<u64, RandomState>::new(Spacing {
+        node: NODE_GAP,
+        layer: LAYER_GAP,
+        corridor: EDGE_GAP,
+        edge: EDGE_GAP,
+    });
+    <TopologicalLayouter<u64, RandomState> as Layouter<
+        W,
+        u64,
+        N,
+        T,
+        LayoutPoint,
+        ArrayVec<[LayoutPoint; 6]>,
+    >>::layout(
+        &mut layouter,
+        weave,
+        // TopologicalLayouter stacks layers vertically. Swap the card axes here
+        // and transpose its output below to preserve the horizontal UI layout.
+        |_| LayoutPoint::new(NODE_H, NODE_W),
     );
 
-    let positions = computed
-        .nodes
-        .iter()
-        .map(|(id, node)| {
-            let center = node.position + node.size / 2.0;
-            (*id, Pos2::new(center.x + MARGIN, center.y + MARGIN))
-        })
-        .collect();
+    let computed_size = <TopologicalLayouter<u64, RandomState> as Layouter<
+        W,
+        u64,
+        N,
+        T,
+        LayoutPoint,
+        ArrayVec<[LayoutPoint; 6]>,
+    >>::size(&layouter);
+    let mut positions = HashMap::with_capacity(weave.len());
+    let mut edge_curves = HashMap::new();
 
-    let edge_curves = computed
-        .edges
-        .iter()
-        .map(|(edge, points)| {
-            let points: Vec<CurvePoint> = points
-                .iter()
-                .map(|point| *point + CurvePoint::splat(MARGIN))
-                .collect();
+    <TopologicalLayouter<u64, RandomState> as Layouter<
+        W,
+        u64,
+        N,
+        T,
+        LayoutPoint,
+        ArrayVec<[LayoutPoint; 6]>,
+    >>::view(
+        &mut layouter,
+        LayoutPoint::ZERO,
+        computed_size,
+        |item| match item {
+            LayoutItem::Node { id, center, .. } => {
+                positions.insert(id, Pos2::new(center.y + MARGIN, center.x + MARGIN));
+            }
+            LayoutItem::Polyline { from, to, points } => {
+                let points: Vec<CurvePoint> = points
+                    .iter()
+                    .map(|point| CurvePoint::new(point.y + MARGIN, point.x + MARGIN))
+                    .collect();
 
-            // `smooth` builds one cubic per route segment with every tangent on
-            // the rank axis, so connectors leave and enter cards horizontally
-            // without pinning endpoint tangents by hand, and each segment
-            // provably stays inside its endpoints' box — the corridors the
-            // layout reserved are enough to keep the curves off the cards.
-            let curves = curve::smooth(&points, DIRECTION.rank_axis(), CURVE_ROUNDNESS);
-            (*edge, curves)
-        })
-        .collect();
+                // The topological layouter routes from card border to card border.
+                // Smooth each horizontal route segment while staying in its reserved
+                // corridor.
+                edge_curves.insert(
+                    (from, to),
+                    curve::smooth(&points, CurvePoint::X, CURVE_ROUNDNESS),
+                );
+            }
+        },
+    );
 
     TreeLayout {
         positions,
         edge_curves,
         size: Vec2::new(
-            computed.size.x + MARGIN * 2.0,
-            computed.size.y + MARGIN * 2.0,
+            computed_size.y + MARGIN * 2.0,
+            computed_size.x + MARGIN * 2.0,
         ),
     }
 }
@@ -195,6 +222,7 @@ fn snippet(text: &str, max_chars: usize) -> String {
 pub fn show(
     ui: &mut egui::Ui,
     nodes: &[TreeNode],
+    layout: &TreeLayout,
     selected: Option<u64>,
     active: &HashSet<u64>,
     path: &HashSet<u64>,
@@ -205,8 +233,6 @@ pub fn show(
         ui.label("The weave is empty — add a root node from the toolbar.");
         return result;
     }
-
-    let layout = layout(nodes);
 
     let size = layout.size.max(ui.available_size());
 
@@ -332,6 +358,8 @@ pub fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::{IndependentDemoNode, IndependentDemoWeave, TextContent};
+    use universal_weave::indexmap::IndexSet;
 
     fn node(id: u64, parents: &[u64]) -> TreeNode {
         TreeNode {
@@ -342,13 +370,30 @@ mod tests {
         }
     }
 
+    fn layout_nodes(nodes: &[TreeNode]) -> TreeLayout {
+        let mut weave = IndependentDemoWeave::with_capacity(nodes.len(), String::new());
+
+        for node in nodes {
+            assert!(weave.insert(IndependentDemoNode {
+                id: node.id,
+                from: IndexSet::from_iter(node.parents.iter().copied()),
+                to: IndexSet::default(),
+                active: false,
+                bookmarked: false,
+                contents: TextContent::default(),
+            }));
+        }
+
+        layout::<_, IndependentDemoNode, TextContent>(&mut weave)
+    }
+
     #[test]
     fn long_edges_route_around_the_ranks_they_cross() {
         // 0 -> 2 skips rank 1, so the layout routes it through a reserved
         // corridor rather than straight through node 1's card.
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0, 1])];
 
-        let layout = layout(&nodes);
+        let layout = layout_nodes(&nodes);
 
         let skipped = Rect::from_center_size(layout.positions[&1], Vec2::new(NODE_W, NODE_H));
         let curves = layout
@@ -371,7 +416,7 @@ mod tests {
     fn layout_lays_out_and_curves_a_diamond() {
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0]), node(3, &[1, 2])];
 
-        let layout = layout(&nodes);
+        let layout = layout_nodes(&nodes);
 
         assert_eq!(layout.positions.len(), nodes.len());
         assert!(layout.positions[&0].x < layout.positions[&1].x);

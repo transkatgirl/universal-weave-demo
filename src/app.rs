@@ -517,6 +517,7 @@ impl EditorState {
         let selected = self.selected;
         let active = self.document.active_set();
         let path: HashSet<u64> = self.document.active_path().into_iter().collect();
+        let tree_layout = (view_mode == ViewMode::Tree2D).then(|| self.document.tree_layout());
         let nodes = self.document.tree_nodes();
         let camera = &mut self.camera;
 
@@ -526,13 +527,24 @@ impl EditorState {
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            tree_view::show(ui, &nodes, selected, &active, &path)
+                            tree_view::show(
+                                ui,
+                                &nodes,
+                                tree_layout
+                                    .as_ref()
+                                    .expect("the 2D view computed a tree layout"),
+                                selected,
+                                &active,
+                                &path,
+                            )
                         })
                         .inner
                 }
                 // The radial view senses drags for orbiting, so it gets the panel
                 // to itself rather than sitting inside a ScrollArea.
-                ViewMode::Radial3D => radial_view::show(ui, &nodes, selected, &active, &path, camera),
+                ViewMode::Radial3D => {
+                    radial_view::show(ui, &nodes, selected, &active, &path, camera)
+                }
             })
             .inner;
 
