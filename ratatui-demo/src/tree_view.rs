@@ -10,6 +10,7 @@ use ratatui::symbols::Marker;
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Rectangle};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use universal_weave::glam::Vec2;
 use universal_weave::layout::{Spacing, TopologicalLayouter};
 use universal_weave::tinyvec::ArrayVec;
@@ -17,6 +18,7 @@ use universal_weave::{LayoutItem, Layouter, Node, Weave};
 
 const NODE_WIDTH: f32 = 24.0;
 const NODE_HEIGHT: f32 = 5.0;
+const NODE_TEXT_PADDING: f32 = 1.0;
 const MARGIN: f32 = 4.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,13 +255,13 @@ pub fn render(frame: &mut Frame, area: Rect, view: TreeView<'_>) {
     }
 
     let (x_bounds, y_bounds) = viewport.bounds(layout);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Weave ")
+        .title_bottom(" arrows: pan  +/-: zoom  0: fit ");
+    let canvas_width = block.inner(area).width;
     let canvas = Canvas::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Weave ")
-                .title_bottom(" arrows: pan  +/-: zoom  0: fit "),
-        )
+        .block(block)
         .marker(Marker::Braille)
         .x_bounds(x_bounds)
         .y_bounds(y_bounds)
@@ -303,30 +305,71 @@ pub fn render(frame: &mut Frame, area: Rect, view: TreeView<'_>) {
                     color,
                 });
 
-                let snippet = snippet(&node.contents, 14);
                 let marker = if node.bookmarked { "★" } else { "" };
+                let prefix = format!("#{id}{marker} ", id = node.id);
+                let available_width = node_label_width(f64::from(center.x), canvas_width, x_bounds)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+                let snippet = snippet(&node.contents, available_width);
+                let label = if snippet.is_empty() {
+                    prefix.trim_end().to_owned()
+                } else {
+                    format!("{prefix}{snippet}")
+                };
                 context.print(
-                    f64::from(center.x - NODE_WIDTH / 2.0 + 1.0),
+                    f64::from(center.x - NODE_WIDTH / 2.0 + NODE_TEXT_PADDING),
                     f64::from(center.y),
-                    TextLine::from(Span::styled(
-                        format!("#{id}{marker} {snippet}", id = node.id),
-                        Style::default().fg(color),
-                    )),
+                    TextLine::from(Span::styled(label, Style::default().fg(color))),
                 );
             }
         });
     frame.render_widget(canvas, area);
 }
 
-fn snippet(text: &str, max_chars: usize) -> String {
+fn node_label_width(center_x: f64, canvas_width: u16, x_bounds: [f64; 2]) -> usize {
+    let [left, right] = x_bounds;
+    if canvas_width <= 1 || right <= left {
+        return 0;
+    }
+
+    let label_x = center_x - f64::from(NODE_WIDTH / 2.0 - NODE_TEXT_PADDING);
+    if label_x < left || label_x > right {
+        return 0;
+    }
+    let right_edge_x = (center_x + f64::from(NODE_WIDTH / 2.0)).min(right);
+    let resolution = f64::from(canvas_width - 1);
+    let column = |x: f64| ((x - left) * resolution / (right - left)) as usize;
+
+    column(right_edge_x).saturating_sub(column(label_x))
+}
+
+fn snippet(text: &str, max_width: usize) -> String {
     let first_line = text.lines().next().unwrap_or("").trim();
-    let mut result: String = first_line.chars().take(max_chars).collect();
-    if first_line.chars().count() > max_chars {
-        result.push('…');
+    let text = if first_line.is_empty() {
+        "(empty)"
+    } else {
+        first_line
+    };
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_owned();
     }
-    if result.is_empty() {
-        result.push_str("(empty)");
+    if max_width == 0 {
+        return String::new();
     }
+
+    let content_width = max_width - UnicodeWidthChar::width('…').unwrap_or(1);
+    let mut width = 0;
+    let mut result: String = text
+        .chars()
+        .take_while(|character| {
+            let character_width = UnicodeWidthChar::width(*character).unwrap_or(0);
+            let fits = width + character_width <= content_width;
+            if fits {
+                width += character_width;
+            }
+            fits
+        })
+        .collect();
+    result.push('…');
     result
 }
 
@@ -368,6 +411,27 @@ mod tests {
         assert_eq!(edges, HashSet::from([(0, 1), (1, 2), (2, 3)]));
         assert!(!edges.contains(&(0, 2)));
         assert!(!edges.contains(&(1, 3)));
+    }
+
+    #[test]
+    fn node_label_width_tracks_terminal_width_and_zoom() {
+        let bounds = [0.0, 100.0];
+        let narrow = node_label_width(50.0, 51, bounds);
+        let wide = node_label_width(50.0, 101, bounds);
+        let zoomed = node_label_width(50.0, 101, [25.0, 75.0]);
+
+        assert_eq!(narrow, 12);
+        assert_eq!(wide, 23);
+        assert_eq!(zoomed, 46);
+    }
+
+    #[test]
+    fn snippet_fits_the_available_display_width() {
+        assert_eq!(snippet("abcdefgh", 5), "abcd…");
+        assert_eq!(snippet("界界界", 5), "界界…");
+        assert_eq!(snippet("", 4), "(em…");
+        assert_eq!(snippet("text", 1), "…");
+        assert_eq!(snippet("text", 0), "");
     }
 
     #[test]
