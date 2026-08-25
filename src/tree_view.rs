@@ -22,8 +22,7 @@ use universal_weave_layout::{
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
 const LAYER_GAP: f32 = 80.0;
-const NODE_GAP: f32 = 30.0;
-const EDGE_GAP: f32 = 20.0;
+const ADJ_GAP: f32 = 30.0;
 const MARGIN: f32 = 30.0;
 /// How far the smoothed connectors' control arms reach along the rank axis, as
 /// a fraction of half the segment's axial span. `1.0` is the roundest.
@@ -132,10 +131,10 @@ where
     for<'a> &'a N::From: IntoIterator<Item = &'a u64>,
 {
     let mut layouter = TopologicalLayouter::<u64, RandomState>::new(Spacing {
-        node: NODE_GAP,
+        node: ADJ_GAP,
         layer: LAYER_GAP,
-        corridor: EDGE_GAP,
-        edge: EDGE_GAP,
+        corridor: 0.0,
+        edge: ADJ_GAP,
     });
     <TopologicalLayouter<u64, RandomState> as Layouter<
         W,

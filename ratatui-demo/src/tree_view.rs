@@ -169,8 +169,8 @@ where
     let mut layouter = TopologicalLayouter::<u64, RandomState>::new(Spacing {
         node: 6.0,
         layer: 12.0,
-        corridor: 3.0,
-        edge: 2.0,
+        corridor: 0.0,
+        edge: 4.0,
     });
     <TopologicalLayouter<u64, RandomState> as Layouter<
         W,
