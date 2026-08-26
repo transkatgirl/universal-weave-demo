@@ -909,7 +909,7 @@ impl App {
         let parents = id_list(&info.parents, "root");
         let children = id_list(&info.children, "none");
         let contents = self.document.node_contents(&id).unwrap_or_default();
-        let text = Text::from(vec![
+        let mut lines = vec![
             Line::styled(
                 format!("Node #{id}"),
                 Style::default()
@@ -925,8 +925,9 @@ impl App {
             )),
             Line::from(format!("Length: {} bytes", info.content_len)),
             Line::from(""),
-            Line::from(contents),
-        ]);
+        ];
+        lines.extend(contents.split('\n').map(|line| Line::from(line.to_owned())));
+        let text = Text::from(lines);
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
     }
 
@@ -994,11 +995,10 @@ impl App {
             .rev()
             .filter_map(|id| self.document.node_contents(id))
             .collect::<String>();
+        let mut lines = vec![Line::styled(breadcrumb, Style::default().fg(Color::DarkGray))];
+        lines.extend(contents.split('\n').map(|line| Line::from(line.to_owned())));
         frame.render_widget(
-            Paragraph::new(Text::from(vec![
-                Line::styled(breadcrumb, Style::default().fg(Color::DarkGray)),
-                Line::from(contents),
-            ]))
+            Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .scroll((self.reading_scroll, 0)),
             area,
