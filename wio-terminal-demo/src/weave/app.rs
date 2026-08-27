@@ -294,11 +294,39 @@ impl ExitChoice {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewDocumentChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+impl NewDocumentChoice {
+    const ALL: [Self; 3] = [Self::Save, Self::Discard, Self::Cancel];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Save => 0,
+            Self::Discard => 1,
+            Self::Cancel => 2,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Save => "Save & create new",
+            Self::Discard => "Discard & create new",
+            Self::Cancel => "Cancel",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Dialog {
     Help(u16),
     Menu(usize),
     NewDocument { kind: WeaveKind, startup: bool },
+    ConfirmNewDocument(NewDocumentChoice),
     ConfirmExit(ExitChoice),
     Keyboard(KeyboardDialog),
 }
@@ -317,6 +345,7 @@ pub struct WeaveApp {
     file_name: String,
     view_mode: bool,
     dirty: bool,
+    new_after_save: bool,
     event: AppEvent,
 }
 
@@ -357,6 +386,7 @@ impl WeaveApp {
             file_name,
             view_mode: false,
             dirty: false,
+            new_after_save: false,
             event: AppEvent::None,
         }
     }
@@ -366,6 +396,7 @@ impl WeaveApp {
         self.selected = document.active_tip();
         self.document = document;
         self.dirty = dirty;
+        self.new_after_save = false;
         self.view_mode = false;
         self.refresh_graph(true);
     }
@@ -485,6 +516,26 @@ impl WeaveApp {
                 }
                 _ => self.dialog = Some(Dialog::NewDocument { kind, startup }),
             },
+            Dialog::ConfirmNewDocument(choice) => match input {
+                Input::Up | Input::Left => {
+                    let index = choice.index().checked_sub(1).unwrap_or(2);
+                    self.dialog = Some(Dialog::ConfirmNewDocument(NewDocumentChoice::ALL[index]));
+                }
+                Input::Down | Input::Right => {
+                    let index = (choice.index() + 1) % NewDocumentChoice::ALL.len();
+                    self.dialog = Some(Dialog::ConfirmNewDocument(NewDocumentChoice::ALL[index]));
+                }
+                Input::Press => match choice {
+                    NewDocumentChoice::Save => {
+                        self.new_after_save = true;
+                        self.request_save(false);
+                    }
+                    NewDocumentChoice::Discard => self.open_new_document_chooser(),
+                    NewDocumentChoice::Cancel => {}
+                },
+                Input::Button3 => {}
+                _ => self.dialog = Some(Dialog::ConfirmNewDocument(choice)),
+            },
             Dialog::ConfirmExit(choice) => match input {
                 Input::Up | Input::Left => {
                     let index = choice.index().checked_sub(1).unwrap_or(2);
@@ -596,12 +647,7 @@ impl WeaveApp {
                 self.open_input(InputPurpose::Title, self.document.metadata().to_owned());
             }
             MenuItem::PanZoom => self.view_mode = true,
-            MenuItem::NewDocument => {
-                self.dialog = Some(Dialog::NewDocument {
-                    kind: self.document.kind(),
-                    startup: false,
-                });
-            }
+            MenuItem::NewDocument => self.request_new_document(),
             MenuItem::Save => {
                 self.request_save(false);
             }
@@ -675,23 +721,48 @@ impl WeaveApp {
     pub fn save_succeeded(&mut self, exit_after: bool) -> AppEvent {
         self.dirty = false;
         self.dialog = None;
-        self.status = "Saved".into();
         if exit_after {
+            self.new_after_save = false;
+            self.status = "Saved".into();
             AppEvent::Close
+        } else if self.new_after_save {
+            self.new_after_save = false;
+            self.open_new_document_chooser();
+            self.status = "Saved; choose the new document kind".into();
+            AppEvent::None
         } else {
+            self.status = "Saved".into();
             AppEvent::None
         }
     }
 
     pub fn save_failed(&mut self, exit_after: bool, error: String) {
         self.status = error;
-        if exit_after {
+        if self.new_after_save {
+            self.new_after_save = false;
+            self.dialog = Some(Dialog::ConfirmNewDocument(NewDocumentChoice::Save));
+        } else if exit_after {
             self.dialog = Some(Dialog::ConfirmExit(ExitChoice::Save));
         }
     }
 
     pub fn set_status(&mut self, status: String) {
         self.status = status;
+    }
+
+    fn request_new_document(&mut self) {
+        if self.dirty {
+            self.dialog = Some(Dialog::ConfirmNewDocument(NewDocumentChoice::Save));
+        } else {
+            self.open_new_document_chooser();
+        }
+    }
+
+    fn open_new_document_chooser(&mut self) {
+        self.dialog = Some(Dialog::NewDocument {
+            kind: self.document.kind(),
+            startup: false,
+        });
     }
 
     fn advance_id(&mut self) {
@@ -1029,6 +1100,7 @@ impl WeaveApp {
             Some(Dialog::Help(_)) => "Joy:Scroll Press:Close",
             Some(Dialog::Menu(_)) => "Joy:Choose Press:Run 1/3:Close",
             Some(Dialog::NewDocument { .. }) => "Joy:Choose Press:Create 3:Cancel",
+            Some(Dialog::ConfirmNewDocument(_)) => "Joy:Choose Press:Confirm 3:Cancel",
             Some(Dialog::ConfirmExit(_)) => "Joy:Choose Press:Confirm 3:Cancel",
             Some(Dialog::Keyboard(entry)) if entry.keyboard_visible => {
                 "Joy:Key Press:Type 1:Cancel 2:Hide 3:Apply"
@@ -1167,6 +1239,7 @@ impl WeaveApp {
             Dialog::Help(scroll) => self.render_help(frame, *scroll),
             Dialog::Menu(index) => self.render_menu(frame, *index),
             Dialog::NewDocument { kind, .. } => self.render_new_document(frame, *kind),
+            Dialog::ConfirmNewDocument(choice) => self.render_confirm_new_document(frame, *choice),
             Dialog::ConfirmExit(choice) => self.render_confirm_exit(frame, *choice),
             Dialog::Keyboard(keyboard) => self.render_keyboard(frame, &keyboard),
         }
@@ -1281,6 +1354,31 @@ impl WeaveApp {
             Paragraph::new(Text::from(lines))
                 .alignment(Alignment::Center)
                 .block(Block::default().borders(Borders::ALL).title(" Exit ")),
+            area,
+        );
+    }
+
+    fn render_confirm_new_document(&self, frame: &mut Frame, choice: NewDocumentChoice) {
+        let area = centered(frame.area(), 38, 8);
+        frame.render_widget(Clear, area);
+        let mut lines = vec![
+            Line::from("The current document has changes."),
+            Line::from(""),
+        ];
+        lines.extend(NewDocumentChoice::ALL.iter().map(|option| {
+            Line::styled(
+                format!(" {} ", option.label()),
+                choice_style(*option == choice),
+            )
+        }));
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" New document "),
+                ),
             area,
         );
     }
@@ -1640,6 +1738,81 @@ mod tests {
         app.save_failed(true, "write failed".into());
         assert!(matches!(app.dialog, Some(Dialog::ConfirmExit(_))));
         assert_eq!(app.save_succeeded(true), AppEvent::Close);
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn dirty_new_document_requires_an_explicit_choice() {
+        let mut app = seeded_app();
+        app.execute_menu_item(MenuItem::ToggleBookmark);
+        let original_title = app.document.metadata().to_owned();
+
+        app.execute_menu_item(MenuItem::NewDocument);
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::ConfirmNewDocument(NewDocumentChoice::Save))
+        );
+
+        // Button 3 cancels without touching the live document.
+        app.handle_input(Input::Button3);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.document.metadata(), original_title);
+        assert!(app.dirty);
+
+        // Discard is a separate choice and still does not replace the
+        // document until the kind chooser is confirmed.
+        app.execute_menu_item(MenuItem::NewDocument);
+        app.handle_input(Input::Down);
+        app.handle_input(Input::Press);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::NewDocument { startup: false, .. })
+        ));
+        assert_eq!(app.document.metadata(), original_title);
+        app.handle_input(Input::Button3);
+        assert_eq!(app.document.metadata(), original_title);
+        assert!(app.dirty);
+
+        app.execute_menu_item(MenuItem::NewDocument);
+        app.handle_input(Input::Down);
+        app.handle_input(Input::Press);
+        app.handle_input(Input::Press);
+        assert_eq!(app.document.metadata(), "Untitled document");
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn save_before_new_waits_for_persistence() {
+        let mut app = seeded_app();
+        app.execute_menu_item(MenuItem::ToggleActive);
+        let original_title = app.document.metadata().to_owned();
+
+        app.execute_menu_item(MenuItem::NewDocument);
+        assert_eq!(
+            app.handle_input(Input::Press),
+            AppEvent::Save { exit_after: false }
+        );
+        assert_eq!(app.document.metadata(), original_title);
+        assert!(app.dirty);
+
+        app.save_failed(false, "write failed".into());
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::ConfirmNewDocument(NewDocumentChoice::Save))
+        );
+        assert_eq!(app.document.metadata(), original_title);
+        assert!(app.dirty);
+
+        assert_eq!(
+            app.handle_input(Input::Press),
+            AppEvent::Save { exit_after: false }
+        );
+        assert_eq!(app.save_succeeded(false), AppEvent::None);
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::NewDocument { startup: false, .. })
+        ));
+        assert_eq!(app.document.metadata(), original_title);
         assert!(!app.dirty);
     }
 

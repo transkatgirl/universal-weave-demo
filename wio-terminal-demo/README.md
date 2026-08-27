@@ -5,9 +5,9 @@ the dependent-tree and independent-DAG editors from the desktop reference demo
 with the firmware's FAT16/FAT32 SD explorer, file actions, verified
 transactional saves, card-removal protection, and battery display.
 
-The firmware creates and opens `.UWE` documents only (case-insensitive).
-`.TXT` and all other files remain visible in the explorer but are not editable.
-The `.UWEAVE` extension is not recognized.
+The firmware creates `.UWE` documents and opens both `.UWE` and `.UWEAVE`
+documents (case-insensitive). `.TXT` and all other files remain visible in the
+explorer but are not editable.
 
 > **Memory warning:** every document is loaded into RAM and serialized in RAM.
 > Memory use depends on graph shape, node count, titles, and node contents.
@@ -19,7 +19,7 @@ The `.UWEAVE` extension is not recognized.
 ## Explorer controls
 
 - Joystick up/down: move selection
-- Joystick right or click: open a folder or `.UWE` document
+- Joystick right or click: open a folder or `.UWE`/`.UWEAVE` document
 - Joystick left or top-left: parent folder
 - Top-middle: create a Weave file or folder
 - Top-right: rename, move, delete, or refresh

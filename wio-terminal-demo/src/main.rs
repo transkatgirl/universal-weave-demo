@@ -35,23 +35,23 @@ mod firmware {
     use wio::entry;
     use wio::hal::clock::GenericClockController;
     use wio::hal::delay::Delay;
-    use wio::hal::gpio::{DYN_PULL_UP_INPUT, DYN_PUSH_PULL_OUTPUT, DynPin};
+    use wio::hal::gpio::{DynPin, DYN_PULL_UP_INPUT, DYN_PUSH_PULL_OUTPUT};
     use wio::hal::rtc;
     use wio::hal::sercom::spi;
     use wio::pac::{CorePeripherals, Peripherals};
     use wio::prelude::*;
 
     use wio_terminal_sd_editor::weave::{
-        AppEvent, Input as WeaveInput, WeaveApp, decode_document, encode_document,
+        decode_document, encode_document, AppEvent, Input as WeaveInput, WeaveApp,
     };
     use wio_terminal_sd_editor::{
-        Button, CREATE_FAILED_PREFIX, CardFs, DELETE_INCOMPLETE_PREFIX, DELETE_UNCONFIRMED,
-        DirectoryItem, EXPLORER_PAGE_ROWS, FsOpError, InputEngine, Key, Keyboard,
+        format_fat32, is_uwe_file, join_path, leaf_name, parent_path, probe_fat,
+        save_failure_reason, sd_retry, validate_entry_name, validate_file_stem, Button, CardFs,
+        DirectoryItem, FsOpError, InputEngine, Key, Keyboard, ProbeError, RawButtons, SdStream,
+        CREATE_FAILED_PREFIX, DELETE_INCOMPLETE_PREFIX, DELETE_UNCONFIRMED, EXPLORER_PAGE_ROWS,
         MAX_ENTRY_NAME_CHARS, MAX_FILE_STEM_CHARS, MOVE_FAILED_PREFIX, NOT_DELETED_PREFIX,
-        OLD_ENTRY_REMAINS, ProbeError, RENAME_FAILED_PREFIX, RawButtons, SAVE_FAILED_KEPT_PREFIX,
-        SAVE_FAILED_PREFIX, SD_RETRY_ATTEMPTS, SdStream, format_fat32, is_uwe_file, join_path,
-        leaf_name, parent_path, probe_fat, save_failure_reason, sd_retry, validate_entry_name,
-        validate_file_stem,
+        OLD_ENTRY_REMAINS, RENAME_FAILED_PREFIX, SAVE_FAILED_KEPT_PREFIX, SAVE_FAILED_PREFIX,
+        SD_RETRY_ATTEMPTS,
     };
 
     const HEAP_SIZE: usize = 166 * 1024;
@@ -1567,7 +1567,7 @@ mod firmware {
                     explorer.selected = 0;
                     explorer.refresh(card);
                 } else if !is_uwe_file(&item.name) {
-                    explorer.status = Some("Only .UWE files can be edited".into());
+                    explorer.status = Some("Only .UWE or .UWEAVE files can be edited".into());
                 } else {
                     match card.read_file_aligned(&item.path) {
                         Ok(bytes) => match decode_document(bytes.as_slice()) {
@@ -1579,7 +1579,7 @@ mod firmware {
                                     media: WeaveMedia::Ready,
                                     identity: identity.expect("mounted explorer has identity"),
                                     new_file: false,
-                                });
+                                })
                             }
                             Err(error) => explorer.status = Some(error),
                         },

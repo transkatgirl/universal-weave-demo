@@ -229,7 +229,11 @@ impl Keyboard {
     }
 
     pub fn row_len(&self, row: usize) -> usize {
-        if row < 3 { 10 } else { 6 }
+        if row < 3 {
+            10
+        } else {
+            6
+        }
     }
 
     pub fn key_at(&self, row: usize, column: usize) -> Key {
@@ -346,7 +350,7 @@ pub fn validate_entry_name(name: &str) -> Result<(), &'static str> {
         Ok(sfn) => sfn,
         Err(FilenameError::FilenameEmpty) => return Err("Enter a name"),
         Err(FilenameError::NameTooLong | FilenameError::MisplacedPeriod) => {
-            return Err("Use an 8.3 name like NOTES.TXT");
+            return Err("Use an 8.3 name like NOTES.TXT")
         }
         Err(_) => return Err("Name contains a FAT-reserved character"),
     };
@@ -362,8 +366,9 @@ pub fn validate_entry_name(name: &str) -> Result<(), &'static str> {
 }
 
 pub fn is_uwe_file(name: &str) -> bool {
-    name.get(name.len().saturating_sub(4)..)
-        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".uwe"))
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("uwe") || extension.eq_ignore_ascii_case("uweave")
+    })
 }
 
 pub fn join_path(parent: &str, name: &str) -> String {
@@ -659,7 +664,7 @@ pub fn probe_fat<S: Read + Seek>(
         // falling through would misread their boot code as an MBR and report
         // a healthy card as damaged instead of unsupported.
         BootSector::ExFat | BootSector::Fat12 | BootSector::SmallFat32 => {
-            return Err(ProbeError::Unsupported);
+            return Err(ProbeError::Unsupported)
         }
         BootSector::Invalid => {}
     }
@@ -3603,8 +3608,10 @@ mod tests {
         // uppercase, and the keyboard types lowercase.
         assert!(validate_entry_name("notes.txt").is_ok());
         assert!(is_uwe_file("NOTES.uWe"));
+        assert!(is_uwe_file("notes.uweave"));
+        assert!(is_uwe_file("NOTES.UwEaVe"));
         assert!(!is_uwe_file("notes.txt"));
-        assert!(!is_uwe_file("notes.uweave"));
+        assert!(!is_uwe_file("notes.uweave.txt"));
         assert_eq!(leaf_name("/A/B.TXT"), "B.TXT");
         assert_eq!(leaf_name("/A/"), "A");
         assert_eq!(leaf_name("/"), "");
