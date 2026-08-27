@@ -233,6 +233,7 @@ enum MenuItem {
     DeleteNode,
     EditTitle,
     PanZoom,
+    #[cfg(test)]
     NewDocument,
     Save,
     ClearLog,
@@ -258,6 +259,7 @@ impl MenuItem {
             Self::DeleteNode => "Delete node",
             Self::EditTitle => "Edit document title",
             Self::PanZoom => "Pan/zoom view",
+            #[cfg(test)]
             Self::NewDocument => "New document",
             Self::Save => "Save",
             Self::ClearLog => "Reset action counters",
@@ -619,7 +621,6 @@ impl WeaveApp {
             MenuItem::DeleteNode,
             MenuItem::EditTitle,
             MenuItem::PanZoom,
-            MenuItem::NewDocument,
             MenuItem::Save,
             MenuItem::ClearLog,
             MenuItem::Help,
@@ -647,6 +648,7 @@ impl WeaveApp {
                 self.open_input(InputPurpose::Title, self.document.metadata().to_owned());
             }
             MenuItem::PanZoom => self.view_mode = true,
+            #[cfg(test)]
             MenuItem::NewDocument => self.request_new_document(),
             MenuItem::Save => {
                 self.request_save(false);
@@ -750,6 +752,7 @@ impl WeaveApp {
         self.status = status;
     }
 
+    #[cfg(test)]
     fn request_new_document(&mut self) {
         if self.dirty {
             self.dialog = Some(Dialog::ConfirmNewDocument(NewDocumentChoice::Save));
@@ -1571,6 +1574,7 @@ mod tests {
     #[test]
     fn menu_opens_navigates_and_runs_items() {
         let mut app = seeded_app();
+        assert!(!app.menu_items().contains(&MenuItem::NewDocument));
         app.handle_input(Input::Button1);
         assert_eq!(app.dialog, Some(Dialog::Menu(0)));
         app.handle_input(Input::Up);

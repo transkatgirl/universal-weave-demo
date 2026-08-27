@@ -3,9 +3,6 @@ name    = "universal-weave-demo"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = ["ratatui-demo"]
-
 [dependencies]
 universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", features = [
 	"layout",
