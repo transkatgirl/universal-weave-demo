@@ -1,0 +1,7 @@
+{
+    // The default build target (thumbv7em-none-eabihf) has no `std` or
+    // `test` crates, so the host-only unit-test targets cannot compile for
+    // it. Keep rust-analyzer from passing --all-targets, which would try.
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.check.allTargets": false
+}

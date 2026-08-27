@@ -1,0 +1,46 @@
+[package]
+name        = "wio-terminal-sd-editor"
+version     = "0.1.0"
+edition     = "2021"
+description = "Universal Weave editor and SD-card explorer for the Seeed Studio Wio Terminal"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[package.metadata]
+chip = "ATSAMD51P19A"
+
+[dependencies]
+embedded-io    = "0.7"
+embedded-sdmmc = "=0.10.0"
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
+rkyv = { version = "0.8.18", default-features = false, features = ["alloc", "bytecheck", "hashbrown-0_17", "indexmap-2"] }
+unicode-width = { version = "0.2", default-features = false }
+universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", rev = "d097c5d1566c6c84a5d6a5260f7517c1fc789ad6" }
+
+[dependencies.ratatui]
+version = "0.30.2"
+default-features = false
+features = ["unstable-rendered-line-info"]
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+cortex-m = "0.7"
+embedded-graphics = "0.8.1"
+embedded-hal = "1"
+embedded-alloc = { version = "0.7", default-features = false, features = [
+	"llff",
+] }
+mousefood = { version = "0.5.2", default-features = false, features = ["fonts"] }
+panic-halt = "0.2"
+# The "wifi" feature is unused by this demo, but wio_terminal 0.9.0 fails to
+# build without it: pins.rs imports the feature-gated wifi module
+# unconditionally (its Pins struct always carries a WifiPins field).
+wio_terminal = { version = "0.9.0", default-features = false, features = [
+	"rt",
+	"wifi",
+] }
+
+[profile.release]
+debug         = true
+lto           = true
+opt-level     = "s" # TODO: measure opt-level = "z" and/or increasing inline-threshold (https://docs.rust-embedded.org/book/unsorted/speed-vs-size.html#optimize-for-size)
+codegen-units = 1
