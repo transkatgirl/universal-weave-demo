@@ -11,12 +11,8 @@ use universal_weave::{
     LayoutItem, Layouter, Node, Weave,
     glam::Vec2 as LayoutPoint,
     hashbrown,
-    layout::{Spacing, TopologicalLayouter},
+    layout::{Spacing, TopologicalLayouter, smooth},
     tinyvec::ArrayVec,
-};
-use universal_weave_layout::{
-    curve::{self, CubicBezier},
-    glam::Vec2 as CurvePoint,
 };
 
 const NODE_W: f32 = 170.0;
@@ -24,9 +20,6 @@ const NODE_H: f32 = 46.0;
 const LAYER_GAP: f32 = 80.0;
 const ADJ_GAP: f32 = 30.0;
 const MARGIN: f32 = 30.0;
-/// How far the smoothed connectors' control arms reach along the rank axis, as
-/// a fraction of half the segment's axial span. `1.0` is the roundest.
-const CURVE_ROUNDNESS: f32 = 1.0;
 
 /// A weave-agnostic snapshot of a node, used for rendering.
 pub struct TreeNode {
@@ -47,7 +40,7 @@ pub struct TreeResponse {
 
 pub(crate) struct TreeLayout {
     positions: HashMap<u64, Pos2>,
-    edge_curves: HashMap<(u64, u64), Vec<CubicBezier<CurvePoint>>>,
+    edge_curves: HashMap<(u64, u64), ArrayVec<[[Pos2; 4]; 5]>>,
     size: Vec2,
 }
 
@@ -178,18 +171,12 @@ where
                 positions.insert(id, Pos2::new(center.y + MARGIN, center.x + MARGIN));
             }
             LayoutItem::Polyline { from, to, points } => {
-                let points: Vec<CurvePoint> = points
-                    .iter()
-                    .map(|point| CurvePoint::new(point.y + MARGIN, point.x + MARGIN))
+                let curves = smooth(points)
+                    .into_iter()
+                    .map(|curve| curve.map(|point| Pos2::new(point.y + MARGIN, point.x + MARGIN)))
                     .collect();
 
-                // The topological layouter routes from card border to card border.
-                // Smooth each horizontal route segment while staying in its reserved
-                // corridor.
-                edge_curves.insert(
-                    (from, to),
-                    curve::smooth(&points, CurvePoint::X, CURVE_ROUNDNESS),
-                );
+                edge_curves.insert((from, to), curves);
             }
         },
     );
@@ -239,7 +226,6 @@ pub fn show(
     // which gives us drag-to-pan scrolling for free.
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let to_screen = |pos: Pos2| response.rect.min + pos.to_vec2();
-    let curve_to_screen = |point: CurvePoint| response.rect.min + Vec2::new(point.x, point.y);
 
     let visuals = ui.visuals();
     let edge_stroke = Stroke::new(1.5, visuals.weak_text_color());
@@ -253,12 +239,7 @@ pub fn show(
             };
             for curve in curves {
                 painter.add(CubicBezierShape::from_points_stroke(
-                    [
-                        curve_to_screen(curve.start),
-                        curve_to_screen(curve.start_control),
-                        curve_to_screen(curve.end_control),
-                        curve_to_screen(curve.end),
-                    ],
+                    curve.map(to_screen),
                     false,
                     Color32::TRANSPARENT,
                     edge_stroke,
@@ -402,9 +383,15 @@ mod tests {
 
         for curve in curves {
             for step in 0..=32 {
-                let point = curve.position(step as f32 / 32.0);
+                let point = CubicBezierShape::from_points_stroke(
+                    *curve,
+                    false,
+                    Color32::TRANSPARENT,
+                    Stroke::NONE,
+                )
+                .sample(step as f32 / 32.0);
                 assert!(
-                    !skipped.contains(Pos2::new(point.x, point.y)),
+                    !skipped.contains(point),
                     "edge 0 -> 2 passes through the card it skips"
                 );
             }
@@ -435,16 +422,13 @@ mod tests {
             // the cards, so the curve needs no clipping to be the connector.
             let source = layout.positions[&edge.0];
             let target = layout.positions[&edge.1];
+            assert_eq!(curves[0][0], Pos2::new(source.x + NODE_W / 2.0, source.y));
             assert_eq!(
-                curves[0].start,
-                CurvePoint::new(source.x + NODE_W / 2.0, source.y)
-            );
-            assert_eq!(
-                curves[curves.len() - 1].end,
-                CurvePoint::new(target.x - NODE_W / 2.0, target.y)
+                curves[curves.len() - 1][3],
+                Pos2::new(target.x - NODE_W / 2.0, target.y)
             );
             for segments in curves.windows(2) {
-                assert_eq!(segments[0].end, segments[1].start);
+                assert_eq!(segments[0][3], segments[1][0]);
             }
         }
     }
