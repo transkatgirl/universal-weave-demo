@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", features = [
+universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", rev = "a64f01a783e94916c452b7f6fca1a47bcde0088c", features = [
 	"layout",
 	"rkyv",
 	"serde",
@@ -18,4 +18,4 @@ rkyv = { version = "0.8.17", features = [
 ] }
 
 [patch.crates-io]
-universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git" }
+universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", rev = "a64f01a783e94916c452b7f6fca1a47bcde0088c" }

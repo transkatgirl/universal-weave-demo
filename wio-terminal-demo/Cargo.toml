@@ -15,7 +15,7 @@ embedded-sdmmc = "=0.10.0"
 hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
 rkyv = { version = "0.8.18", default-features = false, features = ["alloc", "bytecheck", "hashbrown-0_17", "indexmap-2"] }
 unicode-width = { version = "0.2", default-features = false }
-universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", rev = "d097c5d1566c6c84a5d6a5260f7517c1fc789ad6" }
+universal-weave = "0.5.0"
 
 [dependencies.ratatui]
 version = "0.30.2"
