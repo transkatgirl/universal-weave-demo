@@ -2,7 +2,7 @@
 
 An interactive terminal demo for [`universal-weave`](https://github.com/transkatgirl/universal-weave). It demonstrates both the tree-based `DependentWeave` and DAG-based `IndependentWeave` with a topological 2D renderer powered by the crate's `layout` feature.
 
-The demo intentionally does not include the reference application's Loro collaboration or 3D renderer.
+The demo intentionally does not include the reference application's Loro collaboration or the experimental demo's 3D renderer.
 
 ## Run
 

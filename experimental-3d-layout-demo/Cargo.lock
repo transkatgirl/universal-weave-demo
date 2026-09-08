@@ -4264,8 +4264,8 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "universal-weave"
-version = "0.5.0"
-source = "git+https://github.com/transkatgirl/universal-weave.git?rev=2cde2ea0357d52e1f6fbd308fdd382c147a24c47#2cde2ea0357d52e1f6fbd308fdd382c147a24c47"
+version = "0.4.4"
+source = "git+https://github.com/transkatgirl/universal-weave.git?rev=a64f01a783e94916c452b7f6fca1a47bcde0088c#a64f01a783e94916c452b7f6fca1a47bcde0088c"
 dependencies = [
  "contracts",
  "glam",
@@ -4286,6 +4286,16 @@ dependencies = [
  "eframe",
  "rfd",
  "rkyv",
+ "universal-weave",
+ "universal-weave-layout",
+]
+
+[[package]]
+name = "universal-weave-layout"
+version = "0.1.0"
+source = "git+https://github.com/transkatgirl/universal-weave-layout.git#b110d0e8a5980786d3dd9d58f4b467b9caaea25f"
+dependencies = [
+ "glam",
  "universal-weave",
 ]
 

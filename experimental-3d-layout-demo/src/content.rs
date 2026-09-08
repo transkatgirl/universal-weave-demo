@@ -29,12 +29,6 @@ pub struct TextContent(pub String);
 impl IndependentContents for TextContent {}
 
 impl DiscreteContents for TextContent {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-    fn len(&self) -> usize {
-        self.0.len()
-    }
     fn split(self, at: usize) -> DiscreteContentResult<Self> {
         if at == 0 || at >= self.0.len() || !self.0.is_char_boundary(at) {
             return DiscreteContentResult::One(self);

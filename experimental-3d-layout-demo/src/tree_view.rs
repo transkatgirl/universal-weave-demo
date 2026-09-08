@@ -9,8 +9,9 @@ use eframe::egui::{
     epaint::CubicBezierShape,
 };
 use universal_weave::{
-    BuildableNode, LayoutItem, Layouter, Weave,
+    LayoutItem, Layouter, Node, Weave,
     glam::Vec2 as LayoutPoint,
+    hashbrown,
     layout::{Spacing, TopologicalLayouter, smooth},
     tinyvec::ArrayVec,
 };
@@ -24,7 +25,6 @@ const ADJ_GAP: f32 = 30.0;
 const MARGIN: f32 = 30.0;
 
 /// A weave-agnostic snapshot of a node, used for rendering.
-#[allow(dead_code)]
 pub struct TreeNode {
     pub id: u64,
     pub parents: Vec<u64>,
@@ -98,12 +98,83 @@ fn visible_bounds(canvas: Rect, clip: Rect) -> Rect {
     canvas.intersect(clip).translate(-canvas.min.to_vec2())
 }
 
+/// Minimal weave node used to adapt the renderer's snapshot to the layout crate.
+pub(crate) struct LayoutNode {
+    id: u64,
+    children: Vec<u64>,
+}
+
+impl Node<u64, ()> for LayoutNode {
+    type From = ();
+    type To = Vec<u64>;
+
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn from(&self) -> &Self::From {
+        &()
+    }
+
+    fn to(&self) -> &Self::To {
+        &self.children
+    }
+
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    fn contents(&self) -> &() {
+        &()
+    }
+}
+
+/// Adapts the renderer's snapshot to the layout crate, inverting parent links
+/// into children and deriving the root set.
+///
+/// Returns the graph alongside the identifiers of nodes whose parents all fall
+/// outside the snapshot.
+pub(crate) fn build_graph(
+    ordered: &[TreeNode],
+) -> (hashbrown::HashMap<u64, LayoutNode, RandomState>, Vec<u64>) {
+    let ids: HashSet<u64> = ordered.iter().map(|node| node.id).collect();
+    let mut graph = hashbrown::HashMap::with_capacity_and_hasher(ordered.len(), RandomState::new());
+
+    for node in ordered {
+        graph.insert(
+            node.id,
+            LayoutNode {
+                id: node.id,
+                children: Vec::new(),
+            },
+        );
+    }
+
+    for node in ordered {
+        for parent in node.parents.iter().filter(|parent| ids.contains(parent)) {
+            graph
+                .get_mut(parent)
+                .expect("parent was checked against the node set")
+                .children
+                .push(node.id);
+        }
+    }
+
+    let roots: Vec<u64> = ordered
+        .iter()
+        .filter(|node| node.parents.iter().all(|parent| !ids.contains(parent)))
+        .map(|node| node.id)
+        .collect();
+
+    (graph, roots)
+}
+
 /// Computes a left-to-right layout and connector routes using universal-weave's
 /// general-purpose topological layouter.
 pub(crate) fn layout<W, N, T>(weave: &mut W) -> TreeLayout
 where
     W: Weave<u64, N, T>,
-    N: BuildableNode<u64, T>,
+    N: Node<u64, T>,
     for<'a> &'a N::From: IntoIterator<Item = &'a u64>,
 {
     let mut layouter = TopologicalLayouter::<u64, RandomState>::new(Spacing {

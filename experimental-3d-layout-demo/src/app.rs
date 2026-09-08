@@ -5,9 +5,26 @@ use std::collections::HashSet;
 use eframe::egui::{self, Color32, RichText};
 
 use crate::document::{Document, SyncOutcome, WeaveKind, seeded_dependent, synchronize_pair};
-use crate::{persistence, tree_view};
+use crate::{persistence, radial_view, tree_view};
 
 const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
+
+/// Which visualization the central panel renders.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewMode {
+    #[default]
+    Tree2D,
+    Radial3D,
+}
+
+impl ViewMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tree2D => "2D tree",
+            Self::Radial3D => "3D radial",
+        }
+    }
+}
 
 #[derive(Default)]
 struct EditorOutput {
@@ -29,6 +46,8 @@ struct EditorState {
     title_buffer: String,
     move_buffer: String,
     status: String,
+    view_mode: ViewMode,
+    camera: radial_view::Camera,
 }
 
 impl EditorState {
@@ -46,6 +65,8 @@ impl EditorState {
             title_buffer,
             move_buffer: String::new(),
             status,
+            view_mode: ViewMode::default(),
+            camera: radial_view::Camera::default(),
         }
     }
 
@@ -231,6 +252,15 @@ impl EditorState {
                 ui.separator();
                 if ui.button("Add root").clicked() {
                     self.add_root();
+                }
+
+                ui.separator();
+                ui.label("View:");
+                for mode in [ViewMode::Tree2D, ViewMode::Radial3D] {
+                    ui.selectable_value(&mut self.view_mode, mode, mode.label());
+                }
+                if self.view_mode == ViewMode::Radial3D && ui.button("Reset view").clicked() {
+                    self.camera.reset();
                 }
 
                 ui.separator();
@@ -483,20 +513,38 @@ impl EditorState {
         self.action_log(ui);
         self.reading_view(ui);
 
+        let view_mode = self.view_mode;
         let selected = self.selected;
         let active = self.document.active_set();
         let path: HashSet<u64> = self.document.active_path().into_iter().collect();
-        let tree_layout = self.document.tree_layout();
+        let tree_layout = (view_mode == ViewMode::Tree2D).then(|| self.document.tree_layout());
         let nodes = self.document.tree_nodes();
+        let camera = &mut self.camera;
 
         let response = egui::CentralPanel::default()
-            .show(ui, |ui| {
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        tree_view::show(ui, &nodes, &tree_layout, selected, &active, &path)
-                    })
-                    .inner
+            .show(ui, |ui| match view_mode {
+                ViewMode::Tree2D => {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            tree_view::show(
+                                ui,
+                                &nodes,
+                                tree_layout
+                                    .as_ref()
+                                    .expect("the 2D view computed a tree layout"),
+                                selected,
+                                &active,
+                                &path,
+                            )
+                        })
+                        .inner
+                }
+                // The radial view senses drags for orbiting, so it gets the panel
+                // to itself rather than sitting inside a ScrollArea.
+                ViewMode::Radial3D => {
+                    radial_view::show(ui, &nodes, selected, &active, &path, camera)
+                }
             })
             .inner;
 

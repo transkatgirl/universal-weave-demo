@@ -4,6 +4,7 @@ mod app;
 mod content;
 mod document;
 mod persistence;
+mod radial_view;
 mod tree_view;
 
 use app::DemoApp;
