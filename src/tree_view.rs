@@ -1,5 +1,6 @@
 //! Custom-painted tree/DAG visualization for the weave.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::RandomState;
 
@@ -14,6 +15,8 @@ use universal_weave::{
     layout::{Spacing, TopologicalLayouter, smooth},
     tinyvec::ArrayVec,
 };
+
+use crate::content::{IndependentDemoNode, IndependentDemoWeave, TextContent};
 
 const NODE_W: f32 = 170.0;
 const NODE_H: f32 = 46.0;
@@ -39,9 +42,60 @@ pub struct TreeResponse {
 }
 
 pub(crate) struct TreeLayout {
+    layouter: RefCell<TopologicalLayouter<u64, RandomState>>,
+    size: Vec2,
+}
+
+#[derive(Default)]
+struct VisibleTree {
     positions: HashMap<u64, Pos2>,
     edge_curves: HashMap<(u64, u64), ArrayVec<[[Pos2; 4]; 5]>>,
-    size: Vec2,
+}
+
+impl TreeLayout {
+    /// Query in canvas coordinates, undoing the margin and axis transpose.
+    fn view(&self, bounds: Rect) -> VisibleTree {
+        let mut visible = VisibleTree::default();
+        if !bounds.is_positive() {
+            return visible;
+        }
+        let to_layout = |point: Pos2| LayoutPoint::new(point.y - MARGIN, point.x - MARGIN);
+        <TopologicalLayouter<u64, RandomState> as Layouter<
+            IndependentDemoWeave,
+            u64,
+            IndependentDemoNode,
+            TextContent,
+            LayoutPoint,
+            ArrayVec<[LayoutPoint; 6]>,
+        >>::view(
+            &mut self.layouter.borrow_mut(),
+            to_layout(bounds.min),
+            to_layout(bounds.max),
+            |item| match item {
+                LayoutItem::Node { id, center, .. } => {
+                    visible
+                        .positions
+                        .insert(id, Pos2::new(center.y + MARGIN, center.x + MARGIN));
+                }
+                LayoutItem::Polyline { from, to, points } => {
+                    visible.edge_curves.insert(
+                        (from, to),
+                        smooth(points)
+                            .into_iter()
+                            .map(|curve| {
+                                curve.map(|point| Pos2::new(point.y + MARGIN, point.x + MARGIN))
+                            })
+                            .collect(),
+                    );
+                }
+            },
+        );
+        visible
+    }
+}
+
+fn visible_bounds(canvas: Rect, clip: Rect) -> Rect {
+    canvas.intersect(clip).translate(-canvas.min.to_vec2())
 }
 
 /// Minimal weave node used to adapt the renderer's snapshot to the layout crate.
@@ -152,38 +206,8 @@ where
         LayoutPoint,
         ArrayVec<[LayoutPoint; 6]>,
     >>::size(&layouter);
-    let mut positions = HashMap::with_capacity(weave.len());
-    let mut edge_curves = HashMap::new();
-
-    <TopologicalLayouter<u64, RandomState> as Layouter<
-        W,
-        u64,
-        N,
-        T,
-        LayoutPoint,
-        ArrayVec<[LayoutPoint; 6]>,
-    >>::view(
-        &mut layouter,
-        LayoutPoint::ZERO,
-        computed_size,
-        |item| match item {
-            LayoutItem::Node { id, center, .. } => {
-                positions.insert(id, Pos2::new(center.y + MARGIN, center.x + MARGIN));
-            }
-            LayoutItem::Polyline { from, to, points } => {
-                let curves = smooth(points)
-                    .into_iter()
-                    .map(|curve| curve.map(|point| Pos2::new(point.y + MARGIN, point.x + MARGIN)))
-                    .collect();
-
-                edge_curves.insert((from, to), curves);
-            }
-        },
-    );
-
     TreeLayout {
-        positions,
-        edge_curves,
+        layouter: RefCell::new(layouter),
         size: Vec2::new(
             computed_size.y + MARGIN * 2.0,
             computed_size.x + MARGIN * 2.0,
@@ -226,31 +250,27 @@ pub fn show(
     // which gives us drag-to-pan scrolling for free.
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let to_screen = |pos: Pos2| response.rect.min + pos.to_vec2();
+    let visible = layout.view(visible_bounds(response.rect, painter.clip_rect()));
 
     let visuals = ui.visuals();
     let edge_stroke = Stroke::new(1.5, visuals.weak_text_color());
 
     // Routed edges, drawn first so nodes sit on top. In a DAG a node gets
     // one edge from each of its parents.
-    for node in nodes {
-        for parent in &node.parents {
-            let Some(curves) = layout.edge_curves.get(&(*parent, node.id)) else {
-                continue;
-            };
-            for curve in curves {
-                painter.add(CubicBezierShape::from_points_stroke(
-                    curve.map(to_screen),
-                    false,
-                    Color32::TRANSPARENT,
-                    edge_stroke,
-                ));
-            }
+    for curves in visible.edge_curves.values() {
+        for curve in curves {
+            painter.add(CubicBezierShape::from_points_stroke(
+                curve.map(to_screen),
+                false,
+                Color32::TRANSPARENT,
+                edge_stroke,
+            ));
         }
     }
 
     // Nodes.
     for node in nodes {
-        let Some(pos) = layout.positions.get(&node.id) else {
+        let Some(pos) = visible.positions.get(&node.id) else {
             continue;
         };
         let rect = Rect::from_center_size(to_screen(*pos), Vec2::new(NODE_W, NODE_H));
@@ -302,7 +322,7 @@ pub fn show(
     // Interaction.
     let node_at = |point: Pos2| {
         nodes.iter().find_map(|node| {
-            let pos = layout.positions.get(&node.id)?;
+            let pos = visible.positions.get(&node.id)?;
             let rect = Rect::from_center_size(to_screen(*pos), Vec2::new(NODE_W, NODE_H));
             rect.contains(point).then_some(node.id)
         })
@@ -368,12 +388,70 @@ mod tests {
     }
 
     #[test]
+    fn viewport_culls_nodes_but_keeps_partial_cards_and_crossing_edges() {
+        let layout = layout_nodes(&[node(0, &[]), node(1, &[0]), node(2, &[1])]);
+        let full = layout.view(Rect::from_min_size(Pos2::ZERO, layout.size));
+        let source = full.positions[&0];
+        let target = full.positions[&1];
+
+        // The card center is outside this viewport, but its right edge is visible.
+        let partial = layout.view(Rect::from_center_size(
+            source + Vec2::new(NODE_W / 2.0, 0.0),
+            Vec2::splat(2.0),
+        ));
+        assert_eq!(
+            partial.positions.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([0])
+        );
+
+        let crossing = layout.view(Rect::from_center_size(
+            source.lerp(target, 0.5),
+            Vec2::splat(2.0),
+        ));
+        assert!(crossing.positions.is_empty());
+        assert_eq!(
+            crossing.edge_curves.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([(0, 1)])
+        );
+
+        for offset in [Vec2::new(-100.0, 0.0), layout.size + Vec2::splat(100.0)] {
+            let outside = layout.view(Rect::from_min_size(Pos2::ZERO + offset, Vec2::splat(2.0)));
+            assert!(outside.positions.is_empty());
+            assert!(outside.edge_curves.is_empty());
+        }
+        let empty = layout_nodes(&[]).view(Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)));
+        assert!(empty.positions.is_empty());
+        assert!(empty.edge_curves.is_empty());
+    }
+
+    #[test]
+    fn scrolled_clip_is_converted_to_canvas_coordinates() {
+        let layout = layout_nodes(&[node(0, &[]), node(1, &[0])]);
+        let full = layout.view(Rect::from_min_size(Pos2::ZERO, layout.size));
+        let target = full.positions[&1];
+        let origin = Pos2::new(-210.0, -15.0);
+        let canvas = Rect::from_min_size(origin, layout.size);
+        let clip = Rect::from_center_size(origin + target.to_vec2(), Vec2::splat(2.0));
+        let visible = layout.view(visible_bounds(canvas, clip));
+        assert_eq!(
+            visible.positions.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([1])
+        );
+
+        let disjoint = Rect::from_min_size(canvas.max + Vec2::splat(10.0), Vec2::splat(2.0));
+        let visible = layout.view(visible_bounds(canvas, disjoint));
+        assert!(visible.positions.is_empty());
+        assert!(visible.edge_curves.is_empty());
+    }
+
+    #[test]
     fn long_edges_route_around_the_ranks_they_cross() {
         // 0 -> 2 skips rank 1, so the layout routes it through a reserved
         // corridor rather than straight through node 1's card.
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0, 1])];
 
         let layout = layout_nodes(&nodes);
+        let layout = layout.view(Rect::from_min_size(Pos2::ZERO, layout.size));
 
         let skipped = Rect::from_center_size(layout.positions[&1], Vec2::new(NODE_W, NODE_H));
         let curves = layout
@@ -403,6 +481,7 @@ mod tests {
         let nodes = [node(0, &[]), node(1, &[0]), node(2, &[0]), node(3, &[1, 2])];
 
         let layout = layout_nodes(&nodes);
+        let layout = layout.view(Rect::from_min_size(Pos2::ZERO, layout.size));
 
         assert_eq!(layout.positions.len(), nodes.len());
         assert!(layout.positions[&0].x < layout.positions[&1].x);
