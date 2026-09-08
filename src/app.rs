@@ -25,6 +25,9 @@ struct EditorState {
     selected: Option<u64>,
     edit_buffer: String,
     edit_for: Option<u64>,
+    reading_buffer: String,
+    reading_original_text: String,
+    reading_original_path: Vec<u64>,
     split_index: usize,
     title_buffer: String,
     move_buffer: String,
@@ -32,8 +35,10 @@ struct EditorState {
 }
 
 impl EditorState {
-    fn new(document: Document, next_id: u64, id_step: u64, status: String) -> Self {
+    fn new(mut document: Document, next_id: u64, id_step: u64, status: String) -> Self {
         let title_buffer = document.metadata().clone();
+        let (reading_original_path, reading_original_text) = document.active_path_text();
+        let reading_buffer = reading_original_text.clone();
         let selected = None;
         Self {
             document,
@@ -42,6 +47,9 @@ impl EditorState {
             selected,
             edit_buffer: String::new(),
             edit_for: None,
+            reading_buffer,
+            reading_original_text,
+            reading_original_path,
             split_index: 0,
             title_buffer,
             move_buffer: String::new(),
@@ -61,6 +69,54 @@ impl EditorState {
 
     fn title_is_dirty(&self) -> bool {
         self.title_buffer != *self.document.metadata()
+    }
+
+    fn reading_is_dirty(&self) -> bool {
+        self.reading_buffer != self.reading_original_text
+    }
+
+    /// Refreshes a clean reading buffer while preserving staged typing. A dirty
+    /// buffer keeps its snapshot so Apply can detect that the path became stale.
+    fn sync_reading_buffer(&mut self) {
+        if self.document.kind() != WeaveKind::Independent || self.reading_is_dirty() {
+            return;
+        }
+        let (path, text) = self.document.active_path_text();
+        if path != self.reading_original_path || text != self.reading_original_text {
+            self.reading_original_path = path;
+            self.reading_original_text = text.clone();
+            self.reading_buffer = text;
+        }
+    }
+
+    fn reset_reading_buffer(&mut self) {
+        let (path, text) = self.document.active_path_text();
+        self.reading_original_path = path;
+        self.reading_original_text = text.clone();
+        self.reading_buffer = text;
+        self.status = "Reset active-path edit buffer".to_string();
+    }
+
+    fn apply_reading_buffer(&mut self) {
+        match self.document.replace_active_path_text(
+            &self.reading_original_path,
+            &self.reading_original_text,
+            &self.reading_buffer,
+            &mut self.next_id,
+            self.id_step,
+        ) {
+            Ok(true) => {
+                let (path, text) = self.document.active_path_text();
+                self.reading_original_path = path;
+                self.reading_original_text = text.clone();
+                self.reading_buffer = text;
+                self.status =
+                    "Applied active-path edit; replaced content remains on alternate branches"
+                        .to_string();
+            }
+            Ok(false) => self.status = "Active-path edit is unchanged".to_string(),
+            Err(error) => self.status = error,
+        }
     }
 
     /// Refreshes imported state without overwriting locally typed, unapplied text.
@@ -401,7 +457,7 @@ impl EditorState {
                 ui.heading("Reading view");
                 ui.separator();
                 let path = self.document.active_path();
-                if path.is_empty() {
+                if path.is_empty() && self.document.kind() != WeaveKind::Independent {
                     ui.weak("No active node. Double-click a node or use “Set active”.");
                     return;
                 }
@@ -414,14 +470,48 @@ impl EditorState {
                     last.push_str(" (active)");
                 }
                 ui.weak(crumbs.join(" → "));
-                let text = path
-                    .iter()
-                    .rev()
-                    .filter_map(|id| self.document.node_contents(id))
-                    .collect::<String>();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(text).size(15.0)).wrap());
-                });
+                if self.document.kind() == WeaveKind::Independent {
+                    self.sync_reading_buffer();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.reading_buffer)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(5),
+                    );
+                    let staged = self.reading_is_dirty();
+                    ui.horizontal(|ui| {
+                        if staged {
+                            ui.label(
+                                RichText::new("● Staged changes")
+                                    .color(Color32::YELLOW)
+                                    .strong(),
+                            );
+                        } else {
+                            ui.weak("No staged changes");
+                        }
+                        if ui
+                            .add_enabled(staged, egui::Button::new("Apply staged edit"))
+                            .clicked()
+                        {
+                            self.apply_reading_buffer();
+                        }
+                        if ui
+                            .add_enabled(staged, egui::Button::new("Reset"))
+                            .clicked()
+                        {
+                            self.reset_reading_buffer();
+                        }
+                    });
+                    ui.weak("Typing is staged locally; applying creates one branch-preserving path patch.");
+                } else {
+                    let text = path
+                        .iter()
+                        .rev()
+                        .filter_map(|id| self.document.node_contents(id))
+                        .collect::<String>();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(text).size(15.0)).wrap());
+                    });
+                }
             });
     }
 
@@ -723,7 +813,7 @@ impl eframe::App for DemoApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{seeded_collaborative, synchronize_pair};
+    use crate::document::{seeded_collaborative, seeded_independent, synchronize_pair};
 
     #[test]
     fn collaborative_ids_use_disjoint_odd_even_sequences_above_maximum() {
@@ -775,5 +865,56 @@ mod tests {
         editor.refresh_after_import(false, false);
         assert_eq!(editor.selected, None);
         assert_eq!(editor.edit_for, None);
+    }
+
+    #[test]
+    fn clean_reading_buffer_refreshes_when_the_active_path_changes() {
+        let document = seeded_independent();
+        let mut editor = EditorState::new(document, 5, 1, String::new());
+        let original = editor.reading_buffer.clone();
+
+        assert!(editor.document.set_active(&4));
+        editor.sync_reading_buffer();
+
+        assert_ne!(editor.reading_buffer, original);
+        assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
+        assert!(!editor.reading_is_dirty());
+    }
+
+    #[test]
+    fn dirty_reading_buffer_is_preserved_then_rejected_if_stale_until_reset() {
+        let document = seeded_independent();
+        let mut editor = EditorState::new(document, 5, 1, String::new());
+        editor.reading_buffer.push_str("local typing");
+        let staged = editor.reading_buffer.clone();
+
+        assert!(editor.document.set_active(&4));
+        editor.sync_reading_buffer();
+        assert_eq!(editor.reading_buffer, staged);
+
+        editor.apply_reading_buffer();
+        assert!(editor.status.contains("changed while this edit was staged"));
+        assert_eq!(editor.reading_buffer, staged);
+
+        editor.reset_reading_buffer();
+        assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
+        assert!(!editor.reading_is_dirty());
+    }
+
+    #[test]
+    fn reading_buffer_apply_and_noop_refresh_the_snapshot() {
+        let document = seeded_independent();
+        let mut editor = EditorState::new(document, 5, 1, String::new());
+        editor.reading_buffer.push_str("new ending");
+        editor.apply_reading_buffer();
+
+        assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
+        assert_eq!(editor.reading_buffer, editor.reading_original_text);
+        assert!(!editor.reading_is_dirty());
+        let actions = editor.document.action_count();
+
+        editor.apply_reading_buffer();
+        assert_eq!(editor.status, "Active-path edit is unchanged");
+        assert_eq!(editor.document.action_count(), actions);
     }
 }

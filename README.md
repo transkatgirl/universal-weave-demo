@@ -36,6 +36,15 @@ splitting, merging, moving, sorting, bookmarking, and deleting nodes. The
 central canvas renders a scrollable topological 2D graph; click a node to select
 it and double-click it to change its active state.
 
+For independent DAG documents, the reading view is also an active-path editor.
+Typing is staged locally until **Apply** is clicked, then the smallest changed
+Unicode-safe range is applied as one structural path patch. Text removed or
+replaced by the patch is preserved on alternate DAG branches instead of being
+destroyed. **Reset** discards staged typing and reloads the current path. If a
+structural operation changes the path while an edit is staged, Apply rejects the
+stale edit until the buffer is reset. Dependent and Loro reading views remain
+read-only.
+
 Creating a `DependentLoroWeave` opens a second peer window. The two local peers
 can be taken offline, edited independently, and reconnected to demonstrate
 Loro-backed CRDT synchronization. This is an in-process simulation; it does not

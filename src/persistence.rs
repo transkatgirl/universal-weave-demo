@@ -34,7 +34,7 @@ pub fn save_document(path: &Path, document: &Document) -> Result<(), String> {
         ),
         Document::Independent(weave) => (
             VERSION_INDEPENDENT,
-            rkyv::to_bytes::<rancor::Error>(weave.as_weave())
+            rkyv::to_bytes::<rancor::Error>(weave.as_inner().as_weave())
                 .map_err(|e| format!("serialization failed: {e}"))?
                 .into_vec(),
         ),
@@ -158,8 +158,28 @@ mod tests {
         let Document::Independent(original) = document else {
             unreachable!()
         };
-        assert_eq!(original.as_weave(), loaded.as_weave());
-        assert!(loaded.as_weave().validate());
+        assert_eq!(original.as_inner().as_weave(), loaded.as_inner().as_weave());
+        assert!(loaded.as_inner().as_weave().validate());
+    }
+
+    #[test]
+    fn version_two_payload_remains_a_raw_independent_weave() {
+        let document = seeded_independent();
+        let path = temp_file("independent-v2-payload");
+        save_document(&path, &document).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let mut aligned: AlignedVec = AlignedVec::with_capacity(bytes.len());
+        aligned.extend_from_slice(&bytes);
+        let versioned = VersionedBytes::try_from_bytes(aligned.as_slice(), FORMAT_IDENTIFIER)
+            .expect("saved file must have a valid header");
+        assert_eq!(versioned.version, VERSION_INDEPENDENT);
+        let raw = rkyv::from_bytes::<IndependentDemoWeave, rancor::Error>(versioned.data)
+            .expect("version 2 must contain an unwrapped IndependentWeave");
+        assert!(raw.validate());
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(path.parent().unwrap()).ok();
     }
 
     #[test]

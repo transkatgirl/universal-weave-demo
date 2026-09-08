@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
-use universal_weave::wrappers::{LoggedWeave, WeaveAction};
+use universal_weave::wrappers::{LoggedWeave, PatchablePathWeave, WeaveAction};
 use universal_weave::{
     ActivePathWeave, ActiveSingularWeave, BookmarkableWeave, DiscreteWeave, IndependentWeave,
     MetadataWeave, Node, SemiIndependentWeave, SortableWeave, Weave,
@@ -44,6 +44,8 @@ impl WeaveKind {
 type LoggedDependent = LoggedWeave<DemoWeave, u64, DemoNode, TextContent, String>;
 type LoggedIndependent =
     LoggedWeave<IndependentDemoWeave, u64, IndependentDemoNode, TextContent, String>;
+type PatchableIndependent =
+    PatchablePathWeave<LoggedIndependent, u64, IndependentDemoNode, TextContent>;
 type LoggedCollaborative = LoggedWeave<CollaborativeDemoWeave, u64, DemoNode, TextContent, String>;
 
 /// A document wraps one weave implementation, plus its `LoggedWeave` action log.
@@ -51,7 +53,7 @@ type LoggedCollaborative = LoggedWeave<CollaborativeDemoWeave, u64, DemoNode, Te
 /// Variants are boxed to keep the enum small regardless of implementation size.
 pub enum Document {
     Dependent(Box<LoggedDependent>),
-    Independent(Box<LoggedIndependent>),
+    Independent(Box<PatchableIndependent>),
     DependentLoro(Box<LoggedCollaborative>),
 }
 
@@ -70,7 +72,9 @@ impl Document {
     }
 
     pub fn new_independent(weave: IndependentDemoWeave) -> Self {
-        Self::Independent(Box::new(LoggedWeave::from(weave)))
+        Self::Independent(Box::new(PatchableIndependent::from(
+            LoggedIndependent::from(weave),
+        )))
     }
 
     pub fn new_collaborative(weave: CollaborativeDemoWeave) -> Self {
@@ -149,7 +153,7 @@ impl Document {
     pub fn is_valid(&self) -> bool {
         match self {
             Self::Dependent(weave) => weave.as_weave().validate(),
-            Self::Independent(weave) => weave.as_weave().validate(),
+            Self::Independent(weave) => weave.as_inner().as_weave().validate(),
             Self::DependentLoro(weave) => weave.as_weave().validate(),
         }
     }
@@ -311,6 +315,125 @@ impl Document {
             Self::DependentLoro(weave) => weave.get_active_path(&mut path),
         }
         path
+    }
+
+    /// Returns the active-path identifiers (tip to root) and their concatenated text
+    /// (root to tip). The paired snapshot can be used to detect staged edits that
+    /// became stale after a structural operation.
+    pub fn active_path_text(&mut self) -> (Vec<u64>, String) {
+        let path = self.active_path();
+        let text = path
+            .iter()
+            .rev()
+            .filter_map(|id| self.node_contents(id))
+            .collect();
+        (path, text)
+    }
+
+    /// Applies one minimal text replacement to an independent document's active path.
+    ///
+    /// `expected_path` and `expected_text` must still match the document. Generated
+    /// nodes consume identifiers from the editor's existing arithmetic sequence.
+    /// The operation is prepared on a clone so identifier errors cannot leave a
+    /// partially applied structural patch behind.
+    pub fn replace_active_path_text(
+        &mut self,
+        expected_path: &[u64],
+        expected_text: &str,
+        edited_text: &str,
+        next_id: &mut u64,
+        id_step: u64,
+    ) -> Result<bool, String> {
+        let (current_path, current_text) = self.active_path_text();
+        if current_path != expected_path || current_text != expected_text {
+            return Err(
+                "Active path changed while this edit was staged; reset the buffer before applying"
+                    .to_string(),
+            );
+        }
+        if expected_text == edited_text {
+            return Ok(false);
+        }
+
+        let Self::Independent(weave) = self else {
+            return Err(
+                "Active-path editing is only available for independent documents".to_string(),
+            );
+        };
+
+        let (prefix, old_end, replacement) = minimal_replacement(expected_text, edited_text);
+
+        // Determine the wrapper's exact identifier demand with fresh throwaway ids.
+        // Patch operations can request at most five (two boundary splits, a removal
+        // anchor, an insertion split/anchor, and the replacement node).
+        let mut probe_ids = Vec::with_capacity(5);
+        let mut probe = 0_u64;
+        while probe_ids.len() < 5 {
+            if !weave.contains(&probe) {
+                probe_ids.push(probe);
+            }
+            probe = probe
+                .checked_add(1)
+                .ok_or_else(|| "No identifiers are available for path editing".to_string())?;
+        }
+        let mut dry_run = (**weave).clone();
+        let mut probes = probe_ids.into_iter();
+        let mut demanded = 0_usize;
+        let mut generate_probe = || {
+            demanded += 1;
+            probes
+                .next()
+                .expect("patch operations request at most five ids")
+        };
+        if prefix < old_end {
+            dry_run.split_out(prefix..old_end, &mut generate_probe);
+        }
+        if !replacement.is_empty() {
+            dry_run.insert_at(
+                prefix,
+                TextContent(replacement.to_string()),
+                &mut generate_probe,
+            );
+        }
+
+        let mut generated = Vec::with_capacity(demanded);
+        let mut candidate = *next_id;
+        for index in 0..demanded {
+            if weave.contains(&candidate) || generated.contains(&candidate) {
+                return Err(format!(
+                    "Identifier sequence is exhausted or collides at #{candidate}"
+                ));
+            }
+            generated.push(candidate);
+            if index + 1 < demanded {
+                candidate = candidate.checked_add(id_step).ok_or_else(|| {
+                    "Identifier sequence exhausted while preparing the path edit".to_string()
+                })?;
+            }
+        }
+
+        let mut patched = (**weave).clone();
+        let mut ids = generated.into_iter();
+        let mut generate_id = || {
+            ids.next()
+                .expect("identifier demand was measured in advance")
+        };
+        if prefix < old_end {
+            patched.split_out(prefix..old_end, &mut generate_id);
+        }
+        if !replacement.is_empty() {
+            patched.insert_at(
+                prefix,
+                TextContent(replacement.to_string()),
+                &mut generate_id,
+            );
+        }
+        debug_assert!(ids.next().is_none());
+        if demanded > 0 {
+            *next_id = candidate.saturating_add(id_step);
+        }
+        **weave = patched;
+        Ok(true)
     }
 
     /// The tip of the active path, if any.
@@ -505,7 +628,7 @@ impl Document {
     pub fn action_count(&self) -> usize {
         match self {
             Self::Dependent(weave) => weave.as_actions().len(),
-            Self::Independent(weave) => weave.as_actions().len(),
+            Self::Independent(weave) => weave.as_inner().as_actions().len(),
             Self::DependentLoro(weave) => weave.as_actions().len(),
         }
     }
@@ -513,7 +636,7 @@ impl Document {
     pub fn clear_actions(&mut self) {
         match self {
             Self::Dependent(weave) => weave.clear_actions(),
-            Self::Independent(weave) => weave.clear_actions(),
+            Self::Independent(weave) => weave.weave.clear_actions(),
             Self::DependentLoro(weave) => weave.clear_actions(),
         }
     }
@@ -529,6 +652,7 @@ impl Document {
                 .map(format_action)
                 .collect(),
             Self::Independent(weave) => weave
+                .as_inner()
                 .as_actions()
                 .iter()
                 .rev()
@@ -565,6 +689,33 @@ impl Document {
             _ => Err("only collaborative documents have a Loro snapshot".to_string()),
         }
     }
+}
+
+/// Finds the byte range of the one replacement between two UTF-8 strings.
+/// Both returned boundaries are guaranteed to be character boundaries.
+fn minimal_replacement<'a>(original: &str, edited: &'a str) -> (usize, usize, &'a str) {
+    let prefix = original
+        .chars()
+        .zip(edited.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+
+    let original_tail = &original[prefix..];
+    let edited_tail = &edited[prefix..];
+    let suffix = original_tail
+        .chars()
+        .rev()
+        .zip(edited_tail.chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+
+    (
+        prefix,
+        original.len() - suffix,
+        &edited[prefix..edited.len() - suffix],
+    )
 }
 
 /// Indicates which peer incorporated remote changes during a synchronization pass.
@@ -769,6 +920,29 @@ fn format_action<N: FormatNode>(action: &WeaveAction<u64, N, TextContent, String
 mod tests {
     use super::*;
 
+    fn independent_chain(contents: &[&str]) -> Document {
+        let mut weave = IndependentDemoWeave::with_capacity(contents.len(), String::new());
+        for (index, contents) in contents.iter().enumerate() {
+            let id = index as u64;
+            assert!(weave.insert(IndependentDemoNode {
+                id,
+                from: (id > 0).then(|| id - 1).into_iter().collect(),
+                to: IndexSet::default(),
+                active: true,
+                bookmarked: false,
+                contents: TextContent((*contents).to_string()),
+            }));
+        }
+        Document::new_independent(weave)
+    }
+
+    fn replace(document: &mut Document, edited: &str, next_id: &mut u64) -> bool {
+        let (path, text) = document.active_path_text();
+        document
+            .replace_active_path_text(&path, &text, edited, next_id, 1)
+            .unwrap()
+    }
+
     #[test]
     fn seeded_dependent_is_valid() {
         let mut document = seeded_dependent();
@@ -791,6 +965,113 @@ mod tests {
         assert!(document.bookmarks().contains(&1));
         // The whole active path is flagged active in an independent weave.
         assert_eq!(document.active_set(), HashSet::from([0, 1, 3]));
+    }
+
+    #[test]
+    fn active_path_replacement_handles_insert_delete_and_replace() {
+        for (original, edited) in [
+            ("hello world", "hello wide world"),
+            ("hello world", "hello "),
+            ("hello world", "hello weave"),
+        ] {
+            let mut document = independent_chain(&[original]);
+            let mut next_id = 10;
+            assert!(replace(&mut document, edited, &mut next_id));
+            assert_eq!(document.active_path_text().1, edited);
+            assert!(document.is_valid());
+        }
+    }
+
+    #[test]
+    fn active_path_replacement_handles_full_deletion_and_empty_path_insertion() {
+        let mut document = independent_chain(&["remove all of this"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "", &mut next_id));
+        assert_eq!(document.active_path_text().1, "");
+        assert!(document.contains(&0), "removed text must remain in the DAG");
+        assert_eq!(
+            document.node_contents(&0).as_deref(),
+            Some("remove all of this")
+        );
+        assert!(document.is_valid());
+
+        let weave = IndependentDemoWeave::with_capacity(1, String::new());
+        let mut document = Document::new_independent(weave);
+        let mut next_id = 20;
+        assert!(replace(
+            &mut document,
+            "born from an empty path",
+            &mut next_id
+        ));
+        assert_eq!(document.active_path_text().1, "born from an empty path");
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn active_path_replacement_crosses_node_and_unicode_boundaries() {
+        let mut document = independent_chain(&["one ", "two ", "three"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "one THREE", &mut next_id));
+        assert_eq!(document.active_path_text().1, "one THREE");
+        assert!(document.is_valid());
+
+        let mut document = independent_chain(&["aé🙂z"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "aê🦀z", &mut next_id));
+        assert_eq!(document.active_path_text().1, "aê🦀z");
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn replaced_content_survives_on_an_alternate_branch_and_operations_are_logged() {
+        let mut document = independent_chain(&["hello cruel world"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "hello kind world", &mut next_id));
+
+        assert_eq!(document.active_path_text().1, "hello kind world");
+        assert_eq!(document.node_contents(&11).as_deref(), Some("cruel"));
+        assert!(!document.node_info(&11).unwrap().active);
+        let actions = document.formatted_actions().join("\n");
+        assert!(actions.contains("SplitNode"));
+        assert!(actions.contains("AddNode"));
+        assert!(actions.contains("SetActivePath"));
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn unchanged_and_stale_path_edits_are_safe() {
+        let mut document = independent_chain(&["first", " second"]);
+        let (path, text) = document.active_path_text();
+        let action_count = document.action_count();
+        let mut next_id = 10;
+        assert!(
+            !document
+                .replace_active_path_text(&path, &text, &text, &mut next_id, 1)
+                .unwrap()
+        );
+        assert_eq!(document.action_count(), action_count);
+        assert_eq!(next_id, 10);
+
+        assert!(document.set_inactive(&1));
+        let error = document
+            .replace_active_path_text(&path, &text, "stale", &mut next_id, 1)
+            .unwrap_err();
+        assert!(error.contains("changed while this edit was staged"));
+        assert_eq!(document.active_path_text().1, "first");
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn identifier_exhaustion_does_not_partially_patch() {
+        let mut document = independent_chain(&["abcdef"]);
+        let (path, text) = document.active_path_text();
+        let mut next_id = u64::MAX;
+        let error = document
+            .replace_active_path_text(&path, &text, "abXYef", &mut next_id, 1)
+            .unwrap_err();
+        assert!(error.contains("Identifier sequence exhausted"));
+        assert_eq!(document.active_path_text().1, text);
+        assert!(document.is_valid());
     }
 
     #[test]
