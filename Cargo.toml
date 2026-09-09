@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", rev = "2cde2ea0357d52e1f6fbd308fdd382c147a24c47", features = [
+universal-weave = { version = "0.6.0", features = [
 	"layout",
 	"rkyv",
 	"serde",
