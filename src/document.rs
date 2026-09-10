@@ -5,6 +5,7 @@ use std::iter;
 use std::ops::Range;
 
 use dissimilar::Chunk;
+use unicode_segmentation::GraphemeCursor;
 use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
 use universal_weave::wrappers::{LoggedWeave, PatchablePathWeave, WeaveAction};
@@ -348,10 +349,16 @@ impl Document {
     /// document's active path.
     ///
     /// Each changed range found by [`text_hunks`] becomes one branch-preserving path
-    /// patch. Hunks are applied from the end of the text backwards so earlier byte
-    /// offsets stay valid and unchanged text between changes stays shared. Removed
-    /// text stays reachable on alternate branches, and inserted text continues only
-    /// into the active path, never into the text it replaced.
+    /// patch: a single [`PatchablePathWeave::replace`] call, or a
+    /// [`PatchablePathWeave::split_out`] call when the hunk only deletes text. Hunks
+    /// are applied from the end of the text backwards so earlier byte offsets stay
+    /// valid and unchanged text between changes stays shared. Removed text stays
+    /// reachable on alternate branches, and inserted text continues only into the
+    /// active path, never into the text it replaced.
+    ///
+    /// Text appended to a path whose tip is an empty node without continuations, such
+    /// as a node just added from the inspector, fills that placeholder instead of
+    /// inserting in front of it and leaving it dangling at the end of the path.
     ///
     /// `expected_path` and `expected_text` must still match the document. Generated
     /// nodes consume identifiers from the editor's existing arithmetic sequence.
@@ -384,20 +391,45 @@ impl Document {
             );
         };
 
+        // An empty, childless tip is a placeholder for text about to be typed, so an
+        // append fills it rather than inserting in front of it. A placeholder with
+        // several parents is left alone, since filling it would change every path
+        // through it.
+        let placeholder_tip = current_path.first().copied().filter(|tip| {
+            weave.get(tip).is_some_and(|node| {
+                node.contents.0.is_empty() && node.to.is_empty() && node.from.len() <= 1
+            })
+        });
+
         let hunks = text_hunks(expected_text, edited_text);
         let hunk_count = hunks.len();
         let first_change = hunks.first().map(|hunk| hunk.new.start);
         let apply = |target: &mut PatchableIndependent, generate_id: &mut dyn FnMut() -> u64| {
             // Later hunks first, so the byte offsets of earlier hunks stay valid.
             for hunk in hunks.iter().rev() {
-                target.split_out(hunk.old.clone(), &mut *generate_id);
                 let replacement = &edited_text[hunk.new.clone()];
-                if !replacement.is_empty() {
+                if let Some(tip) = placeholder_tip
+                    && hunk.old.is_empty()
+                    && hunk.old.start == expected_text.len()
+                {
+                    let filled = target
+                        .get_contents_mut(&tip, |contents| contents.0 = replacement.to_owned());
+                    debug_assert!(
+                        filled.is_some(),
+                        "the placeholder tip is on the active path"
+                    );
+                    continue;
+                }
+                if replacement.is_empty() {
+                    // A pure deletion only detaches the old range; `replace` would
+                    // leave an empty node behind on the active path.
+                    target.split_out(hunk.old.clone(), &mut *generate_id);
+                } else {
                     // `prefix_all` stays false: the inserted node continues only into the
                     // active path, so it is never linked to the text it replaced and
                     // repeated insertions at one position grow the graph linearly.
-                    target.insert_at(
-                        hunk.old.start,
+                    target.replace(
+                        hunk.old.clone(),
                         TextContent(replacement.to_owned()),
                         false,
                         &mut *generate_id,
@@ -741,11 +773,12 @@ struct TextHunk {
 /// Unchanged text between changes is left in place rather than folded into one
 /// large replacement. Where a change could sit at several equivalent positions,
 /// such as an inserted repeated word, it is aligned to the nearest word, sentence,
-/// or line boundary. A change that starts or ends inside a word is then widened to
-/// the whole word, and changes that meet are merged, so the old and new branches
-/// hold complete words rather than fragments such as `ue` and `hur`. Punctuation is
-/// a boundary unless it joins two word characters, so `Tuesday.` becoming
-/// `Thursday.` replaces only the word, while `don't` is widened as one word.
+/// or line boundary. A change that starts or ends inside a grapheme cluster or a
+/// word is then widened to the whole cluster or word, and changes that meet are
+/// merged, so the old and new branches hold complete words rather than fragments
+/// such as `ue` and `hur`, and a letter is never separated from its combining marks.
+/// Punctuation is a boundary unless it joins two word characters, so `Tuesday.`
+/// becoming `Thursday.` replaces only the word, while `don't` is widened as one word.
 fn text_hunks(original: &str, edited: &str) -> Vec<TextHunk> {
     let mut hunks = Vec::new();
     let mut pending: Option<TextHunk> = None;
@@ -783,47 +816,81 @@ fn text_hunks(original: &str, edited: &str) -> Vec<TextHunk> {
     widen_to_words(original, edited, &hunks)
 }
 
-/// Whether the character starting at byte `at` of `text` belongs to a word.
+/// The grapheme cluster starting at byte `at` of `text`, if any.
 ///
-/// Alphanumeric characters always do. Any other non-whitespace character does only
-/// when it joins two alphanumeric characters, such as the apostrophe in `don't`, the
-/// hyphen in `well-known`, or the point in `3.14`. Punctuation at the edge of a word
-/// or next to whitespace is a boundary.
+/// `at` must be a cluster boundary.
+fn grapheme_at(text: &str, at: usize) -> Option<&str> {
+    let end = GraphemeCursor::new(at, text.len(), true)
+        .next_boundary(text, 0)
+        .ok()
+        .flatten()?;
+    Some(&text[at..end])
+}
+
+/// The grapheme cluster ending at byte `at` of `text`, if any.
+///
+/// `at` must be a cluster boundary.
+fn grapheme_before(text: &str, at: usize) -> Option<&str> {
+    let start = GraphemeCursor::new(at, text.len(), true)
+        .prev_boundary(text, 0)
+        .ok()
+        .flatten()?;
+    Some(&text[start..at])
+}
+
+/// Whether byte `at` of `text` sits between two grapheme clusters rather than inside one.
+fn is_grapheme_boundary(text: &str, at: usize) -> bool {
+    GraphemeCursor::new(at, text.len(), true)
+        .is_boundary(text, 0)
+        .unwrap_or(true)
+}
+
+/// Whether a grapheme cluster carries a letter or digit, such as `e` with a combining accent.
+fn is_alphanumeric_grapheme(grapheme: &str) -> bool {
+    grapheme.chars().any(char::is_alphanumeric)
+}
+
+/// Whether the grapheme cluster starting at byte `at` of `text` belongs to a word.
+///
+/// Clusters carrying a letter or digit always do, including a base character with its
+/// combining marks. Any other non-whitespace cluster does only when it joins two such
+/// clusters, such as the apostrophe in `don't`, the hyphen in `well-known`, or the
+/// point in `3.14`. Punctuation at the edge of a word or next to whitespace is a
+/// boundary.
 fn is_word_at(text: &str, at: usize) -> bool {
-    let Some(character) = text[at..].chars().next() else {
+    let Some(grapheme) = grapheme_at(text, at) else {
         return false;
     };
-    if character.is_alphanumeric() {
+    if is_alphanumeric_grapheme(grapheme) {
         return true;
     }
-    if character.is_whitespace() {
+    if grapheme.chars().all(char::is_whitespace) {
         return false;
     }
-    let previous = text[..at].chars().next_back();
-    let next = text[at + character.len_utf8()..].chars().next();
-    previous.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric)
+    grapheme_before(text, at).is_some_and(is_alphanumeric_grapheme)
+        && grapheme_at(text, at + grapheme.len()).is_some_and(is_alphanumeric_grapheme)
 }
 
-/// Whether the character ending at byte `at` of `text` belongs to a word.
+/// Whether the grapheme cluster ending at byte `at` of `text` belongs to a word.
 fn is_word_ending_at(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_some_and(|character| is_word_at(text, at - character.len_utf8()))
+    grapheme_before(text, at).is_some_and(|grapheme| is_word_at(text, at - grapheme.len()))
 }
 
-/// Widens hunks whose boundaries fall inside a word out to the surrounding word
-/// boundaries, then merges hunks that touch or overlap.
+/// Moves hunk boundaries that fall inside a grapheme cluster or a word out to the
+/// surrounding cluster and word boundaries, then merges hunks that touch or overlap.
 ///
-/// The unchanged text around a hunk is identical in both strings, so the character
-/// on the shared side of a boundary is the same in `original` and `edited` and a
-/// boundary can move over it in both. Only that character's neighbours, and so its
-/// punctuation context, can differ, which is why each check consults both texts.
-/// A boundary is inside a word when a word character sits on one side of it and
-/// another follows on the other side in either the old or the new text.
+/// The unchanged text around a hunk is identical in both strings, so the text on the
+/// shared side of a boundary is the same in `original` and `edited` and a boundary can
+/// move over it in both. Only that text's neighbours, and so its cluster and
+/// punctuation context, can differ, which is why each check consults both texts. A
+/// boundary is inside a cluster when it separates a base character from its combining
+/// marks or modifiers in either text; it is inside a word when a word cluster sits on
+/// one side of it and another follows on the other side in either the old or the new
+/// text.
 fn widen_to_words(original: &str, edited: &str, hunks: &[TextHunk]) -> Vec<TextHunk> {
-    let before = |at: usize| original[..at].chars().next_back();
-    let after = |at: usize| original[at..].chars().next();
+    let shared_boundary = |old_at: usize, new_at: usize| {
+        is_grapheme_boundary(original, old_at) && is_grapheme_boundary(edited, new_at)
+    };
     let shared_word_before = |old_at: usize, new_at: usize| {
         is_word_ending_at(original, old_at) || is_word_ending_at(edited, new_at)
     };
@@ -833,34 +900,52 @@ fn widen_to_words(original: &str, edited: &str, hunks: &[TextHunk]) -> Vec<TextH
     let mut widened: Vec<TextHunk> = Vec::with_capacity(hunks.len());
     for (index, hunk) in hunks.iter().enumerate() {
         let mut hunk = hunk.clone();
+        let floor = index
+            .checked_sub(1)
+            .map_or(0, |previous| hunks[previous].old.end);
+        let ceiling = hunks
+            .get(index + 1)
+            .map_or(original.len(), |next| next.old.start);
 
+        // Step over single characters until both texts agree the edge is a cluster
+        // boundary, so a node is never split between a base character and its marks.
+        while hunk.old.start > floor
+            && !shared_boundary(hunk.old.start, hunk.new.start)
+            && let Some(character) = original[..hunk.old.start].chars().next_back()
+        {
+            hunk.old.start -= character.len_utf8();
+            hunk.new.start -= character.len_utf8();
+        }
+        while hunk.old.end < ceiling
+            && !shared_boundary(hunk.old.end, hunk.new.end)
+            && let Some(character) = original[hunk.old.end..].chars().next()
+        {
+            hunk.old.end += character.len_utf8();
+            hunk.new.end += character.len_utf8();
+        }
+
+        // Then step over whole clusters out to the edges of the surrounding words.
         if shared_word_before(hunk.old.start, hunk.new.start)
             && (is_word_at(original, hunk.old.start) || is_word_at(edited, hunk.new.start))
         {
-            let floor = index
-                .checked_sub(1)
-                .map_or(0, |previous| hunks[previous].old.end);
             while hunk.old.start > floor
-                && let Some(character) = before(hunk.old.start)
+                && let Some(grapheme) = grapheme_before(original, hunk.old.start)
                 && shared_word_before(hunk.old.start, hunk.new.start)
             {
-                hunk.old.start -= character.len_utf8();
-                hunk.new.start -= character.len_utf8();
+                hunk.old.start -= grapheme.len();
+                hunk.new.start -= grapheme.len();
             }
         }
         if shared_word_after(hunk.old.end, hunk.new.end)
             && (is_word_ending_at(original, hunk.old.end)
                 || is_word_ending_at(edited, hunk.new.end))
         {
-            let ceiling = hunks
-                .get(index + 1)
-                .map_or(original.len(), |next| next.old.start);
             while hunk.old.end < ceiling
-                && let Some(character) = after(hunk.old.end)
+                && let Some(grapheme) = grapheme_at(original, hunk.old.end)
                 && shared_word_after(hunk.old.end, hunk.new.end)
             {
-                hunk.old.end += character.len_utf8();
-                hunk.new.end += character.len_utf8();
+                hunk.old.end += grapheme.len();
+                hunk.new.end += grapheme.len();
             }
         }
 
@@ -1441,6 +1526,34 @@ mod tests {
     }
 
     #[test]
+    fn text_hunks_keep_grapheme_clusters_whole() {
+        // A combining accent stays with its base character on both branches.
+        assert_eq!(
+            hunk_texts("cafe\u{301} au lait", "cofe\u{301} au lait"),
+            vec![("cafe\u{301}", "cofe\u{301}")]
+        );
+        // Changing the base character under a combining mark keeps the mark with it.
+        assert_eq!(
+            hunk_texts("cafe\u{301}", "cafa\u{301}"),
+            vec![("cafe\u{301}", "cafa\u{301}")]
+        );
+        // Changing an emoji modifier replaces the whole cluster.
+        assert_eq!(
+            hunk_texts("ok \u{1F44D}\u{1F3FD} go", "ok \u{1F44D}\u{1F3FB} go"),
+            vec![("\u{1F44D}\u{1F3FD}", "\u{1F44D}\u{1F3FB}")]
+        );
+        // A flag is one cluster, and a Windows line ending is never split.
+        assert_eq!(
+            hunk_texts("a \u{1F1FA}\u{1F1F8} b", "a \u{1F1EC}\u{1F1E7} b"),
+            vec![("\u{1F1FA}\u{1F1F8}", "\u{1F1EC}\u{1F1E7}")]
+        );
+        assert_eq!(
+            hunk_texts("one\r\ntwo", "one\r\n\r\ntwo"),
+            vec![("", "\r\n")]
+        );
+    }
+
+    #[test]
     fn partial_word_edits_replace_whole_words() {
         let mut document = independent_chain(&["The letter came on a Tuesday."]);
         let mut next_id = 10;
@@ -1465,6 +1578,47 @@ mod tests {
         assert_eq!(document.node_info(&new).unwrap().children, vec![period]);
         assert!(!document.node_info(&old).unwrap().active);
         assert!(document.node_info(&new).unwrap().active);
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn appending_fills_an_empty_placeholder_tip() {
+        // A childless empty tip, such as a node just added from the inspector, takes
+        // the appended text instead of being left dangling behind a new node.
+        let mut document = independent_chain(&["hello"]);
+        assert!(document.add_child(&0, 1));
+        let (path, text) = document.active_path_text();
+        let mut next_id = 10;
+        let summary = document
+            .replace_active_path_text(&path, &text, "hello world", &mut next_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            document.active_path_text(),
+            (vec![1, 0], "hello world".to_string())
+        );
+        assert_eq!(document.node_contents(&1).as_deref(), Some(" world"));
+        assert_eq!(summary.created_nodes, 0);
+        assert_eq!(summary.focus, Some(1));
+        assert_eq!(next_id, 10);
+        assert!(document.is_valid());
+
+        // Typing into a fully deleted path refills its empty root.
+        let mut document = independent_chain(&["hello"]);
+        assert!(replace(&mut document, "", &mut next_id));
+        let nodes = document.len();
+        assert!(replace(&mut document, "new", &mut next_id));
+        assert_eq!(document.len(), nodes);
+        assert_eq!(document.active_path_text().1, "new");
+        assert!(document.is_valid());
+
+        // An empty tip that other branches continue from is left alone.
+        let mut document = independent_chain(&["hello", "", "!"]);
+        assert!(document.set_inactive(&2));
+        assert_eq!(document.active_path(), vec![1, 0]);
+        assert!(replace(&mut document, "hello world", &mut next_id));
+        assert_eq!(document.node_contents(&1).as_deref(), Some(""));
+        assert_eq!(document.active_path_text().1, "hello world");
         assert!(document.is_valid());
     }
 
@@ -1520,11 +1674,13 @@ mod tests {
 
     #[test]
     fn identifier_exhaustion_does_not_partially_patch() {
-        let mut document = independent_chain(&["abcdef"]);
+        // Replacing the middle word splits both neighbours, so the patch needs several
+        // identifiers while the sequence can only produce one more.
+        let mut document = independent_chain(&["one two three"]);
         let (path, text) = document.active_path_text();
         let mut next_id = u64::MAX;
         let error = document
-            .replace_active_path_text(&path, &text, "abXYef", &mut next_id, 1)
+            .replace_active_path_text(&path, &text, "one TWO three", &mut next_id, 1)
             .unwrap_err();
         assert!(error.contains("Identifier sequence exhausted"));
         assert_eq!(document.active_path_text().1, text);

@@ -12,14 +12,14 @@ const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
 /// Applies a staged active-path edit while the reading-view editor has keyboard focus.
 const APPLY_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 
-/// Whether the active-path editor holds typing that can still be applied.
+/// Whether a staged text buffer still applies to the document state it was loaded from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadingStatus {
-    /// The buffer matches the active path.
+enum BufferStatus {
+    /// The buffer matches the document.
     Clean,
-    /// The buffer holds typing that can be applied to the path it was staged on.
+    /// The buffer holds typing that can be applied to the state it was staged on.
     Staged,
-    /// The active path changed under staged typing, so the edit no longer applies.
+    /// The document changed under staged typing, so the edit no longer applies.
     Stale,
 }
 
@@ -27,6 +27,52 @@ enum ReadingStatus {
 fn count(quantity: usize, noun: &str) -> String {
     let suffix = if quantity == 1 { "" } else { "s" };
     format!("{quantity} {noun}{suffix}")
+}
+
+/// Shows whether a text buffer holds staged typing, and warns when that typing is stale.
+fn buffer_status_label(
+    ui: &mut egui::Ui,
+    status: BufferStatus,
+    stale_label: &str,
+    stale_hint: &str,
+) {
+    match status {
+        BufferStatus::Clean => {
+            ui.weak("No staged changes");
+        }
+        BufferStatus::Staged => {
+            ui.label(
+                RichText::new("● Staged changes")
+                    .color(Color32::YELLOW)
+                    .strong(),
+            );
+        }
+        BufferStatus::Stale => {
+            ui.label(
+                RichText::new(format!("⚠ {stale_label}"))
+                    .color(Color32::LIGHT_RED)
+                    .strong(),
+            )
+            .on_hover_text(stale_hint);
+        }
+    }
+}
+
+/// A button that puts staged typing on the clipboard, so it survives a Reset.
+///
+/// Shown only while the buffer holds staged typing. Returns whether it was clicked.
+fn copy_button(ui: &mut egui::Ui, status: BufferStatus, text: &str) -> bool {
+    if status == BufferStatus::Clean {
+        return false;
+    }
+    let clicked = ui
+        .button("Copy staged text")
+        .on_hover_text("Copy the staged text to the clipboard.")
+        .clicked();
+    if clicked {
+        ui.ctx().copy_text(text.to_owned());
+    }
+    clicked
 }
 
 #[derive(Default)]
@@ -44,6 +90,7 @@ struct EditorState {
     id_step: u64,
     selected: Option<u64>,
     edit_buffer: String,
+    edit_original: String,
     edit_for: Option<u64>,
     reading_buffer: String,
     reading_original_text: String,
@@ -66,6 +113,7 @@ impl EditorState {
             id_step,
             selected,
             edit_buffer: String::new(),
+            edit_original: String::new(),
             edit_for: None,
             reading_buffer,
             reading_original_text,
@@ -77,14 +125,26 @@ impl EditorState {
         }
     }
 
+    /// Whether the inspector holds typing for the selected node that can still be applied.
+    ///
+    /// The buffer is compared with the contents it was loaded from, so a node that
+    /// changed underneath staged typing, for example because a path edit split it or a
+    /// peer edited it, is reported as stale instead of being silently overwritten.
+    fn edit_status(&self) -> BufferStatus {
+        let Some(id) = self.edit_for.filter(|id| Some(*id) == self.selected) else {
+            return BufferStatus::Clean;
+        };
+        if self.edit_buffer == self.edit_original {
+            BufferStatus::Clean
+        } else if self.document.node_contents(&id).as_deref() == Some(self.edit_original.as_str()) {
+            BufferStatus::Staged
+        } else {
+            BufferStatus::Stale
+        }
+    }
+
     fn edit_is_dirty(&self) -> bool {
-        self.edit_for.is_some()
-            && self.edit_for == self.selected
-            && self
-                .edit_for
-                .and_then(|id| self.document.node_contents(&id))
-                .as_deref()
-                != Some(self.edit_buffer.as_str())
+        self.edit_status() != BufferStatus::Clean
     }
 
     fn title_is_dirty(&self) -> bool {
@@ -99,22 +159,22 @@ impl EditorState {
     ///
     /// A dirty buffer keeps its snapshot, so typing survives structural operations and
     /// the editor can show that the path changed underneath it.
-    fn sync_reading_buffer(&mut self) -> ReadingStatus {
+    fn sync_reading_buffer(&mut self) -> BufferStatus {
         if self.document.kind() != WeaveKind::Independent {
-            return ReadingStatus::Clean;
+            return BufferStatus::Clean;
         }
         let (path, text) = self.document.active_path_text();
         let path_changed = path != self.reading_original_path || text != self.reading_original_text;
         match (self.reading_is_dirty(), path_changed) {
-            (true, true) => ReadingStatus::Stale,
-            (true, false) => ReadingStatus::Staged,
+            (true, true) => BufferStatus::Stale,
+            (true, false) => BufferStatus::Staged,
             (false, changed) => {
                 if changed {
                     self.reading_original_path = path;
                     self.reading_original_text = text.clone();
                     self.reading_buffer = text;
                 }
-                ReadingStatus::Clean
+                BufferStatus::Clean
             }
         }
     }
@@ -147,10 +207,14 @@ impl EditorState {
                     self.selected = Some(id);
                     self.edit_for = None;
                 }
+                let created = if summary.created_nodes == 0 {
+                    String::new()
+                } else {
+                    format!(", creating {}", count(summary.created_nodes, "node"))
+                };
                 self.status = format!(
-                    "Applied {} to the active path, creating {}; replaced text remains on alternate branches",
-                    count(summary.hunks, "change"),
-                    count(summary.created_nodes, "node")
+                    "Applied {} to the active path{created}; replaced text remains on alternate branches",
+                    count(summary.hunks, "change")
                 );
             }
             Ok(None) => self.status = "Active-path edit is unchanged".to_string(),
@@ -173,17 +237,11 @@ impl EditorState {
     }
 
     /// Refreshes imported state without overwriting locally typed, unapplied text.
-    fn refresh_after_import(&mut self, edit_was_dirty: bool, title_was_dirty: bool) {
+    fn refresh_after_import(&mut self, title_was_dirty: bool) {
         if self.selected.is_some_and(|id| !self.document.contains(&id)) {
             self.selected = None;
-            self.edit_for = None;
-            if !edit_was_dirty {
-                self.edit_buffer.clear();
-            }
-        } else if !edit_was_dirty {
-            self.edit_for = None;
-            self.sync_edit_buffer();
         }
+        self.sync_edit_buffer();
         if !title_was_dirty {
             self.title_buffer.clone_from(self.document.metadata());
         }
@@ -193,16 +251,60 @@ impl EditorState {
         self.next_id = self.next_id.saturating_add(self.id_step);
     }
 
+    /// Loads the selected node into the inspector buffer.
+    ///
+    /// A clean buffer follows the node's contents when they change underneath it, such
+    /// as after a path edit splits the node. A dirty buffer keeps its snapshot, so
+    /// typing survives and the inspector can show that the node changed.
     fn sync_edit_buffer(&mut self) {
         if self.edit_for != self.selected {
-            self.edit_buffer = self
+            self.edit_original = self
                 .selected
                 .and_then(|id| self.document.node_contents(&id))
                 .unwrap_or_default();
+            self.edit_buffer.clone_from(&self.edit_original);
             self.edit_for = self.selected;
             self.split_index = self.edit_buffer.len() / 2;
             self.move_buffer.clear();
+        } else if self.edit_buffer == self.edit_original
+            && let Some(contents) = self
+                .edit_for
+                .and_then(|id| self.document.node_contents(&id))
+            && contents != self.edit_original
+        {
+            self.edit_original = contents;
+            self.edit_buffer.clone_from(&self.edit_original);
+            self.split_index = self.edit_buffer.len() / 2;
         }
+    }
+
+    /// Applies the inspector buffer to its node, refusing when the node changed underneath it.
+    fn apply_edit_buffer(&mut self, id: u64) {
+        match self.edit_status() {
+            BufferStatus::Stale => {
+                self.status = format!(
+                    "Node #{id} changed while this edit was staged; reset the buffer before applying"
+                );
+            }
+            BufferStatus::Clean => self.status = format!("Contents of #{id} are unchanged"),
+            BufferStatus::Staged => {
+                if self.document.apply_edit(&id, self.edit_buffer.clone()) {
+                    self.edit_original.clone_from(&self.edit_buffer);
+                    self.status = format!("Edited contents of #{id}");
+                } else {
+                    self.status = format!("Failed to edit #{id}");
+                }
+            }
+        }
+    }
+
+    fn reset_edit_buffer(&mut self) {
+        self.edit_original = self
+            .edit_for
+            .and_then(|id| self.document.node_contents(&id))
+            .unwrap_or_default();
+        self.edit_buffer.clone_from(&self.edit_original);
+        self.status = "Reset node edit buffer".to_string();
     }
 
     fn add_root(&mut self) {
@@ -406,16 +508,44 @@ impl EditorState {
         ui.label(format!("Length: {} bytes", info.content_len));
         ui.separator();
 
-        ui.label("Contents:");
+        let status = self.edit_status();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Contents:");
+            buffer_status_label(
+                ui,
+                status,
+                "Node changed; staged edit is stale",
+                "The node's contents changed while this edit was staged, for example \
+                 because a path edit split it. Copy anything you want to keep, then \
+                 Reset to reload the node.",
+            );
+        });
         ui.add(
             egui::TextEdit::multiline(&mut self.edit_buffer)
                 .desired_width(f32::INFINITY)
                 .desired_rows(6),
         );
-        if ui.button("Apply edit").clicked() {
-            self.document.apply_edit(&id, self.edit_buffer.clone());
-            self.status = format!("Edited contents of #{id}");
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    status == BufferStatus::Staged,
+                    egui::Button::new("Apply edit"),
+                )
+                .clicked()
+            {
+                self.apply_edit_buffer(id);
+            }
+            if ui
+                .add_enabled(status != BufferStatus::Clean, egui::Button::new("Reset"))
+                .on_hover_text("Discard staged typing and reload the node's contents.")
+                .clicked()
+            {
+                self.reset_edit_buffer();
+            }
+            if copy_button(ui, status, &self.edit_buffer) {
+                self.status = format!("Copied the staged text for #{id} to the clipboard");
+            }
+        });
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
@@ -511,15 +641,17 @@ impl EditorState {
                 let status = if editable {
                     self.sync_reading_buffer()
                 } else {
-                    ReadingStatus::Clean
+                    BufferStatus::Clean
                 };
                 let editor_id = ui.make_persistent_id("active_path_editor");
                 // The shortcut fires only while the editor itself has keyboard focus, so it
-                // never takes Enter away from the inspector or the title field.
-                let mut apply = status == ReadingStatus::Staged
-                    && ui.memory(|memory| memory.has_focus(editor_id))
+                // never takes Enter away from the inspector or the title field. It is
+                // consumed whatever the buffer's state, so a stale or unchanged edit
+                // reports why nothing was applied instead of silently doing nothing.
+                let mut apply = ui.memory(|memory| memory.has_focus(editor_id))
                     && ui.input_mut(|input| input.consume_shortcut(&APPLY_SHORTCUT));
                 let mut reset = false;
+                let mut copy = false;
 
                 // The controls live in the heading row so a long path can never push them
                 // out of the panel.
@@ -529,33 +661,18 @@ impl EditorState {
                         return;
                     }
                     ui.separator();
-                    match status {
-                        ReadingStatus::Clean => {
-                            ui.weak("No staged changes");
-                        }
-                        ReadingStatus::Staged => {
-                            ui.label(
-                                RichText::new("● Staged changes")
-                                    .color(Color32::YELLOW)
-                                    .strong(),
-                            );
-                        }
-                        ReadingStatus::Stale => {
-                            ui.label(
-                                RichText::new("⚠ Active path changed; staged edit is stale")
-                                    .color(Color32::LIGHT_RED)
-                                    .strong(),
-                            )
-                            .on_hover_text(
-                                "The staged text no longer matches the path it was typed on. \
-                                 Copy anything you want to keep, then Reset to reload the path.",
-                            );
-                        }
-                    }
+                    buffer_status_label(
+                        ui,
+                        status,
+                        "Active path changed; staged edit is stale",
+                        "The staged text no longer matches the path it was typed on. Restore \
+                         the path to continue, or copy the staged text and Reset to reload \
+                         the path.",
+                    );
                     let shortcut = ui.ctx().format_shortcut(&APPLY_SHORTCUT);
                     apply |= ui
                         .add_enabled(
-                            status == ReadingStatus::Staged,
+                            status == BufferStatus::Staged,
                             egui::Button::new("Apply staged edit"),
                         )
                         .on_hover_text(format!(
@@ -564,9 +681,10 @@ impl EditorState {
                         ))
                         .clicked();
                     reset = ui
-                        .add_enabled(status != ReadingStatus::Clean, egui::Button::new("Reset"))
+                        .add_enabled(status != BufferStatus::Clean, egui::Button::new("Reset"))
                         .on_hover_text("Discard staged typing and reload the current active path.")
                         .clicked();
+                    copy = copy_button(ui, status, &self.reading_buffer);
                 });
                 ui.separator();
 
@@ -601,6 +719,9 @@ impl EditorState {
                         self.apply_reading_buffer();
                     } else if reset {
                         self.reset_reading_buffer();
+                    } else if copy {
+                        self.status =
+                            "Copied the staged active-path text to the clipboard".to_string();
                     }
                 } else {
                     let text = path
@@ -875,18 +996,15 @@ impl DemoApp {
             return None;
         };
 
-        let a_edit_dirty = self.peer_a.edit_is_dirty();
         let a_title_dirty = self.peer_a.title_is_dirty();
-        let b_edit_dirty = peer_b.edit_is_dirty();
         let b_title_dirty = peer_b.title_is_dirty();
         match synchronize_pair(&mut self.peer_a.document, &mut peer_b.document) {
             Ok(outcome) => {
                 if outcome.peer_a_changed {
-                    self.peer_a
-                        .refresh_after_import(a_edit_dirty, a_title_dirty);
+                    self.peer_a.refresh_after_import(a_title_dirty);
                 }
                 if outcome.peer_b_changed {
-                    peer_b.refresh_after_import(b_edit_dirty, b_title_dirty);
+                    peer_b.refresh_after_import(b_title_dirty);
                 }
                 if outcome.peer_a_changed || outcome.peer_b_changed {
                     self.peer_a.status = "Synchronized with Peer B".to_string();
@@ -995,15 +1113,22 @@ mod tests {
 
         remote.apply_edit(&3, "remote value".to_string());
         synchronize_pair(&mut editor.document, &mut remote).unwrap();
-        editor.refresh_after_import(false, false);
+        editor.refresh_after_import(false);
         assert_eq!(editor.edit_buffer, "remote value");
+        assert_eq!(editor.edit_status(), BufferStatus::Clean);
 
         editor.edit_buffer = "unapplied local typing".to_string();
         remote.apply_edit(&3, "new remote value".to_string());
-        let dirty = editor.edit_is_dirty();
         synchronize_pair(&mut editor.document, &mut remote).unwrap();
-        editor.refresh_after_import(dirty, false);
+        editor.refresh_after_import(false);
         assert_eq!(editor.edit_buffer, "unapplied local typing");
+        // The remote change is reported rather than silently overwritten on apply.
+        assert_eq!(editor.edit_status(), BufferStatus::Stale);
+        editor.apply_edit_buffer(3);
+        assert_eq!(
+            editor.document.node_contents(&3).as_deref(),
+            Some("new remote value")
+        );
     }
 
     #[test]
@@ -1016,9 +1141,83 @@ mod tests {
 
         assert_eq!(remote.remove(&3), Some(1));
         synchronize_pair(&mut editor.document, &mut remote).unwrap();
-        editor.refresh_after_import(false, false);
+        editor.refresh_after_import(false);
         assert_eq!(editor.selected, None);
         assert_eq!(editor.edit_for, None);
+    }
+
+    #[test]
+    fn inspector_edit_goes_stale_when_a_path_edit_splits_its_node() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.selected = Some(0);
+        editor.sync_edit_buffer();
+        assert_eq!(editor.edit_status(), BufferStatus::Clean);
+        editor.edit_buffer.push_str(" [typing]");
+        assert_eq!(editor.edit_status(), BufferStatus::Staged);
+
+        editor.reading_buffer = editor.reading_buffer.replacen("Tuesday", "Friday", 1);
+        editor.apply_reading_buffer();
+        assert_eq!(editor.selected, Some(0));
+        assert_eq!(editor.edit_status(), BufferStatus::Stale);
+        assert!(editor.edit_buffer.ends_with(" [typing]"));
+
+        // Applying is refused, so the shortened node is not overwritten with its old text.
+        let contents = editor.document.node_contents(&0).unwrap();
+        assert!(contents.ends_with("on a "));
+        let path_text = editor.document.active_path_text().1;
+        editor.apply_edit_buffer(0);
+        assert!(editor.status.contains("changed while this edit was staged"));
+        assert_eq!(editor.document.node_contents(&0).unwrap(), contents);
+        assert_eq!(editor.document.active_path_text().1, path_text);
+
+        editor.reset_edit_buffer();
+        assert_eq!(editor.edit_status(), BufferStatus::Clean);
+        assert_eq!(editor.edit_buffer, contents);
+    }
+
+    #[test]
+    fn clean_inspector_buffer_follows_its_node_and_apply_refreshes_the_snapshot() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.selected = Some(3);
+        editor.sync_edit_buffer();
+        assert!(
+            editor
+                .document
+                .apply_edit(&3, "changed elsewhere".to_string())
+        );
+        editor.sync_edit_buffer();
+        assert_eq!(editor.edit_buffer, "changed elsewhere");
+        assert_eq!(editor.edit_status(), BufferStatus::Clean);
+
+        editor.edit_buffer.push('!');
+        assert_eq!(editor.edit_status(), BufferStatus::Staged);
+        editor.apply_edit_buffer(3);
+        assert_eq!(
+            editor.document.node_contents(&3).as_deref(),
+            Some("changed elsewhere!")
+        );
+        assert_eq!(editor.edit_status(), BufferStatus::Clean);
+        assert_eq!(editor.status, "Edited contents of #3");
+    }
+
+    #[test]
+    fn appending_after_add_child_fills_the_new_node() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.add_child(3);
+        assert_eq!(editor.selected, Some(5));
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Clean);
+        editor.reading_buffer.push_str("A new sentence.");
+        editor.apply_reading_buffer();
+        assert_eq!(
+            editor.document.node_contents(&5).as_deref(),
+            Some("A new sentence.")
+        );
+        assert_eq!(
+            editor.status,
+            "Applied 1 change to the active path; replaced text remains on alternate branches"
+        );
+        assert_eq!(editor.selected, Some(5));
+        assert_eq!(editor.next_id, 6);
     }
 
     #[test]
@@ -1041,10 +1240,10 @@ mod tests {
         let mut editor = EditorState::new(document, 5, 1, String::new());
         editor.reading_buffer.push_str("local typing");
         let staged = editor.reading_buffer.clone();
-        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Staged);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Staged);
 
         assert!(editor.document.set_active(&4));
-        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Stale);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
         assert_eq!(editor.reading_buffer, staged);
 
         // The document still rejects the stale edit if Apply is forced.
@@ -1053,7 +1252,7 @@ mod tests {
         assert_eq!(editor.reading_buffer, staged);
 
         editor.reset_reading_buffer();
-        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Clean);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Clean);
         assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
         assert!(!editor.reading_is_dirty());
     }
@@ -1067,7 +1266,7 @@ mod tests {
         assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
         assert_eq!(editor.reading_buffer, editor.reading_original_text);
         assert!(!editor.reading_is_dirty());
-        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Clean);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Clean);
         assert!(
             editor
                 .status

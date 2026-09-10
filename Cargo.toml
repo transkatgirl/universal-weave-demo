@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 dissimilar = "1.0"
-universal-weave = { version = "0.8.0", features = [
+universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", features = [
 	"layout",
 	"rkyv",
 	"serde",
@@ -16,3 +16,4 @@ rfd = "0.17"
 rkyv = { version = "0.8.17", features = [
 	"bytecheck",
 ] }
+unicode-segmentation = "1"
