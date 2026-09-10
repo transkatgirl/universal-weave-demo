@@ -74,6 +74,12 @@ while edits are unapplied asks for confirmation, and saving warns that unapplied
 edits are not part of the saved file. Dependent and Loro reading views remain
 read-only.
 
+While an edit is staged, the editor previews it: text a change would add is
+highlighted, the character beside removed text is underlined, and alternate
+nodes are shaded so their boundaries stay visible. The heading counts the staged
+changes. Ctrl+Enter (⌘+Enter on macOS) also applies the inspector's contents
+editor while it has keyboard focus.
+
 Creating a `DependentLoroWeave` opens a second peer window. The two local peers
 can be taken offline, edited independently, and reconnected to demonstrate
 Loro-backed CRDT synchronization. This is an in-process simulation; it does not

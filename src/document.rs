@@ -1115,6 +1115,130 @@ fn widen_to_words(original: &str, edited: &str, hunks: &[TextHunk]) -> Vec<TextH
     widened
 }
 
+/// How a span of an edited active-path text relates to the document, for previewing
+/// an edit before it is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    /// Text the document already holds, in the node at this position on the path,
+    /// counted from the root.
+    Shared { node: usize },
+    /// Text a change would add: it becomes a new node, or the path switches to an
+    /// existing branch that already holds it.
+    Changed,
+}
+
+/// One span of a previewed edit, as byte offsets into the edited text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewSpan {
+    pub range: Range<usize>,
+    pub kind: PreviewKind,
+    /// Whether this span is the character beside a point where text was removed
+    /// without replacement, so the removal can be marked although it has no text.
+    pub marks_removal: bool,
+}
+
+/// What applying an edit would change, laid over the edited text for highlighting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditPreview {
+    /// Non-empty spans covering the whole edited text in order, without gaps.
+    pub spans: Vec<PreviewSpan>,
+    /// The number of changes an apply would make; zero when the texts are identical.
+    pub changes: usize,
+}
+
+/// Previews the changes between `original` and `edited` as
+/// [`Document::replace_active_path_text`] would apply them.
+///
+/// `node_lengths` holds the byte length of each node's text along the path from root
+/// to tip, so unchanged text can be attributed to its node. When the lengths do not
+/// add up to `original`, for example because a node on the path was removed, the
+/// whole text counts as one node.
+pub fn preview_edit(original: &str, edited: &str, node_lengths: &[usize]) -> EditPreview {
+    let hunks = text_hunks(original, edited);
+
+    // Where each node's text starts in the original.
+    let mut starts = Vec::with_capacity(node_lengths.len());
+    let mut cursor = 0_usize;
+    for length in node_lengths {
+        starts.push(cursor);
+        cursor += length;
+    }
+    if starts.is_empty() || cursor != original.len() {
+        starts = vec![0];
+    }
+
+    // Span edges in the edited text: the edges of every change, every node boundary
+    // no change swallowed (moved by the size difference of the changes before it),
+    // and the edges of each character that marks a removal.
+    let mut cuts = vec![0, edited.len()];
+    let mut earlier = hunks.iter().peekable();
+    let (mut added, mut removed) = (0_usize, 0_usize);
+    for &start in &starts[1..] {
+        while let Some(hunk) = earlier.next_if(|hunk| hunk.old.end <= start) {
+            added += hunk.new.len();
+            removed += hunk.old.len();
+        }
+        if earlier.peek().is_none_or(|hunk| hunk.old.start >= start) {
+            cuts.push(start - removed + added);
+        }
+    }
+    let mut removal_marks = Vec::new();
+    for hunk in &hunks {
+        cuts.push(hunk.new.start);
+        cuts.push(hunk.new.end);
+        if hunk.new.is_empty() {
+            let at = hunk.new.start;
+            let mark = if at < edited.len() {
+                grapheme_at(edited, at).map(|grapheme| at..at + grapheme.len())
+            } else {
+                grapheme_before(edited, at).map(|grapheme| at - grapheme.len()..at)
+            };
+            if let Some(mark) = mark {
+                cuts.push(mark.start);
+                cuts.push(mark.end);
+                removal_marks.push(mark);
+            }
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut spans = Vec::with_capacity(cuts.len());
+    let mut earlier = hunks.iter().peekable();
+    let (mut added, mut removed) = (0_usize, 0_usize);
+    for pair in cuts.windows(2) {
+        let range = pair[0]..pair[1];
+        while let Some(hunk) = earlier.next_if(|hunk| hunk.new.end <= range.start) {
+            added += hunk.new.len();
+            removed += hunk.old.len();
+        }
+        let kind = if earlier
+            .peek()
+            .is_some_and(|hunk| hunk.new.start <= range.start)
+        {
+            PreviewKind::Changed
+        } else {
+            let offset = range.start - added + removed;
+            PreviewKind::Shared {
+                node: starts.partition_point(|&start| start <= offset) - 1,
+            }
+        };
+        let marks_removal = removal_marks
+            .iter()
+            .any(|mark| mark.start <= range.start && range.end <= mark.end);
+        spans.push(PreviewSpan {
+            range,
+            kind,
+            marks_removal,
+        });
+    }
+
+    EditPreview {
+        spans,
+        changes: hunks.len(),
+    }
+}
+
 /// Indicates which peer incorporated remote changes during a synchronization pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SyncOutcome {
@@ -1706,6 +1830,113 @@ mod tests {
             hunk_texts("one\r\ntwo", "one\r\n\r\ntwo"),
             vec![("", "\r\n")]
         );
+    }
+
+    /// The spans of a preview as `(range, kind, marks_removal)`, checked to cover the text.
+    fn preview_spans(
+        original: &str,
+        edited: &str,
+        node_lengths: &[usize],
+    ) -> Vec<(Range<usize>, PreviewKind, bool)> {
+        let preview = preview_edit(original, edited, node_lengths);
+        let mut expected_start = 0;
+        for span in &preview.spans {
+            assert_eq!(span.range.start, expected_start, "spans must be contiguous");
+            assert!(!span.range.is_empty(), "spans must not be empty");
+            assert!(edited.is_char_boundary(span.range.end));
+            expected_start = span.range.end;
+        }
+        assert_eq!(expected_start, edited.len(), "spans must cover the text");
+        assert_eq!(preview.changes, text_hunks(original, edited).len());
+        preview
+            .spans
+            .into_iter()
+            .map(|span| (span.range, span.kind, span.marks_removal))
+            .collect()
+    }
+
+    #[test]
+    fn edit_previews_attribute_unchanged_text_to_its_node() {
+        use PreviewKind::Shared;
+        assert_eq!(
+            preview_spans("one two three", "one two three", &[4, 4, 5]),
+            vec![
+                (0..4, Shared { node: 0 }, false),
+                (4..8, Shared { node: 1 }, false),
+                (8..13, Shared { node: 2 }, false),
+            ]
+        );
+        assert_eq!(preview_edit("one", "one", &[3]).changes, 0);
+        // Empty nodes take no span, and their neighbours keep their positions.
+        assert_eq!(
+            preview_spans("ab", "ab", &[1, 0, 1]),
+            vec![
+                (0..1, Shared { node: 0 }, false),
+                (1..2, Shared { node: 2 }, false)
+            ]
+        );
+        // Lengths that do not add up to the text fall back to a single node.
+        assert_eq!(
+            preview_spans("abc", "abc", &[1, 1]),
+            vec![(0..3, Shared { node: 0 }, false)]
+        );
+        assert_eq!(preview_spans("", "", &[0]), vec![]);
+    }
+
+    #[test]
+    fn edit_previews_mark_changes_and_removals() {
+        use PreviewKind::{Changed, Shared};
+        // A replacement inside a node keeps the boundaries around it in place.
+        assert_eq!(
+            preview_spans("one two three", "one 2 three", &[4, 4, 5]),
+            vec![
+                (0..4, Shared { node: 0 }, false),
+                (4..5, Changed, false),
+                (5..6, Shared { node: 1 }, false),
+                (6..11, Shared { node: 2 }, false),
+            ]
+        );
+        // A change spanning a node boundary swallows it.
+        assert_eq!(
+            preview_spans("one two three", "one TWO THREE", &[4, 4, 5]),
+            vec![(0..4, Shared { node: 0 }, false), (4..13, Changed, false)]
+        );
+        // Text typed after the end is a change, previewed as widened for applying.
+        assert_eq!(
+            preview_spans("one", "one two", &[3]),
+            vec![(0..3, Shared { node: 0 }, false), (3..7, Changed, false)]
+        );
+        assert_eq!(
+            preview_spans("The cat sa", "The cat sat", &[10]),
+            vec![(0..8, Shared { node: 0 }, false), (8..11, Changed, false)]
+        );
+        assert_eq!(
+            preview_edit("one two three", "ONE two THREE", &[13]).changes,
+            2
+        );
+        // Removed text has nothing to highlight, so the character beside it is marked:
+        // the one after the removal, or the one before it at the end of the text.
+        assert_eq!(
+            preview_spans("one two", "two", &[4, 3]),
+            vec![
+                (0..1, Shared { node: 1 }, true),
+                (1..3, Shared { node: 1 }, false)
+            ]
+        );
+        assert_eq!(
+            preview_spans("one two", "one", &[4, 3]),
+            vec![
+                (0..2, Shared { node: 0 }, false),
+                (2..3, Shared { node: 0 }, true)
+            ]
+        );
+        assert_eq!(
+            preview_spans("\u{e9} x", "x", &[4]),
+            vec![(0..1, Shared { node: 0 }, true)]
+        );
+        // Removing everything leaves nothing to mark.
+        assert_eq!(preview_spans("gone", "", &[4]), vec![]);
+        assert_eq!(preview_edit("gone", "", &[4]).changes, 1);
     }
 
     #[test]

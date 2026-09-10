@@ -1,10 +1,18 @@
 //! Application state and the two-peer native UI.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
+use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
+use eframe::egui::{
+    self, Color32, FontSelection, Galley, Key, KeyboardShortcut, Modifiers, RichText, Stroke,
+    TextBuffer,
+};
 
-use crate::document::{Document, SyncOutcome, WeaveKind, seeded_dependent, synchronize_pair};
+use crate::document::{
+    Document, EditPreview, PreviewKind, SyncOutcome, WeaveKind, preview_edit, seeded_dependent,
+    synchronize_pair,
+};
 use crate::{persistence, tree_view};
 
 const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
@@ -33,6 +41,8 @@ fn count(quantity: usize, noun: &str) -> String {
 fn buffer_status_label(
     ui: &mut egui::Ui,
     status: BufferStatus,
+    staged_label: &str,
+    staged_hint: &str,
     stale_label: &str,
     stale_hint: &str,
 ) {
@@ -42,10 +52,11 @@ fn buffer_status_label(
         }
         BufferStatus::Staged => {
             ui.label(
-                RichText::new("● Staged changes")
+                RichText::new(format!("● {staged_label}"))
                     .color(Color32::YELLOW)
                     .strong(),
-            );
+            )
+            .on_hover_text(staged_hint);
         }
         BufferStatus::Stale => {
             ui.label(
@@ -75,6 +86,98 @@ fn copy_button(ui: &mut egui::Ui, status: BufferStatus, text: &str) -> bool {
     clicked
 }
 
+/// The preview of the reading buffer's staged edit, recomputed only when its inputs change.
+///
+/// The editor's layouter asks for it on every layout, so the diff is not rerun per frame.
+#[derive(Default)]
+struct PreviewCache {
+    original: String,
+    edited: String,
+    node_lengths: Vec<usize>,
+    preview: EditPreview,
+}
+
+impl PreviewCache {
+    fn get(&mut self, original: &str, edited: &str, node_lengths: &[usize]) -> &EditPreview {
+        if self.original != original || self.edited != edited || self.node_lengths != node_lengths {
+            self.original.replace_range(.., original);
+            self.edited.replace_range(.., edited);
+            self.node_lengths.clear();
+            self.node_lengths.extend_from_slice(node_lengths);
+            self.preview = preview_edit(original, edited, node_lengths);
+        }
+        &self.preview
+    }
+}
+
+/// The background of text a staged change would add: the staged-changes yellow, faded
+/// so the text stays readable on either theme.
+fn change_highlight() -> Color32 {
+    Color32::YELLOW.gamma_multiply(0.3)
+}
+
+/// The underline marking the character beside removed text.
+const REMOVAL_MARK: Stroke = Stroke {
+    width: 1.5,
+    color: Color32::LIGHT_RED,
+};
+
+/// Lays out the reading editor's text with its staged edit previewed.
+///
+/// Alternate nodes are shaded so their boundaries show, text a change would add is
+/// highlighted, and the character beside removed text is underlined. Font and color
+/// follow egui's own text-edit layout, so the preview changes nothing else.
+fn preview_layout(
+    ui: &egui::Ui,
+    text: &str,
+    preview: &EditPreview,
+    wrap_width: f32,
+) -> Arc<Galley> {
+    let visuals = ui.visuals();
+    let font_id = FontSelection::default().resolve(ui.style());
+    let color = visuals
+        .override_text_color
+        .unwrap_or_else(|| visuals.widgets.inactive.text_color());
+    let node_shade = visuals.weak_text_color().gamma_multiply(0.15);
+
+    let mut job = if preview.spans.is_empty() {
+        LayoutJob::simple(text.to_owned(), font_id.clone(), color, wrap_width)
+    } else {
+        LayoutJob {
+            wrap: TextWrapping {
+                max_width: wrap_width,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    };
+    // Like egui's own layouter: hiding trailing whitespace feels wrong while typing.
+    job.keep_trailing_whitespace = true;
+
+    let mut shaded = false;
+    let mut previous_node = None;
+    for span in &preview.spans {
+        let mut format = TextFormat::simple(font_id.clone(), color);
+        match span.kind {
+            PreviewKind::Shared { node } => {
+                if previous_node.is_some_and(|previous| previous != node) {
+                    shaded = !shaded;
+                }
+                previous_node = Some(node);
+                if shaded {
+                    format.background = node_shade;
+                }
+            }
+            PreviewKind::Changed => format.background = change_highlight(),
+        }
+        if span.marks_removal {
+            format.underline = REMOVAL_MARK;
+        }
+        job.append(&text[span.range.clone()], 0.0, format);
+    }
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
 #[derive(Default)]
 struct EditorOutput {
     open: bool,
@@ -95,6 +198,7 @@ struct EditorState {
     reading_buffer: String,
     reading_original_text: String,
     reading_original_path: Vec<u64>,
+    reading_preview: PreviewCache,
     split_index: usize,
     title_buffer: String,
     move_buffer: String,
@@ -118,6 +222,7 @@ impl EditorState {
             reading_buffer,
             reading_original_text,
             reading_original_path,
+            reading_preview: PreviewCache::default(),
             split_index: 0,
             title_buffer,
             move_buffer: String::new(),
@@ -544,24 +649,38 @@ impl EditorState {
             buffer_status_label(
                 ui,
                 status,
+                "Staged changes",
+                "Apply edit replaces the node's contents with this text.",
                 "Node changed; staged edit is stale",
                 "The node's contents changed while this edit was staged, for example \
                  because a path edit split it. Copy anything you want to keep, then \
                  Reset to reload the node.",
             );
         });
+        let editor_id = ui.make_persistent_id("node_contents_editor");
+        // As in the reading view, the shortcut fires only while this editor has focus,
+        // and is consumed in every buffer state so a stale or unchanged edit reports
+        // why nothing was applied.
+        let apply = ui.memory(|memory| memory.has_focus(editor_id))
+            && ui.input_mut(|input| input.consume_shortcut(&APPLY_SHORTCUT));
         ui.add(
             egui::TextEdit::multiline(&mut self.edit_buffer)
+                .id(editor_id)
                 .desired_width(f32::INFINITY)
                 .desired_rows(6),
         );
         ui.horizontal_wrapped(|ui| {
+            let shortcut = ui.ctx().format_shortcut(&APPLY_SHORTCUT);
             if ui
                 .add_enabled(
                     status == BufferStatus::Staged,
                     egui::Button::new("Apply edit"),
                 )
+                .on_hover_text(format!(
+                    "{shortcut} — replace the node's contents with this text."
+                ))
                 .clicked()
+                || apply
             {
                 self.apply_edit_buffer(id);
             }
@@ -684,6 +803,26 @@ impl EditorState {
                 let mut restore = false;
                 let mut copy = false;
                 let path = self.document.active_path();
+                // The byte length of each node on the path the buffer was loaded from,
+                // root to tip, so the preview can show where the nodes meet.
+                let node_lengths: Vec<usize> = self
+                    .reading_original_path
+                    .iter()
+                    .rev()
+                    .map(|id| {
+                        self.document
+                            .node_info(id)
+                            .map_or(0, |info| info.content_len)
+                    })
+                    .collect();
+                let changes = self
+                    .reading_preview
+                    .get(
+                        &self.reading_original_text,
+                        &self.reading_buffer,
+                        &node_lengths,
+                    )
+                    .changes;
 
                 // The controls live in the heading row so a long path can never push them
                 // out of the panel.
@@ -696,6 +835,11 @@ impl EditorState {
                     buffer_status_label(
                         ui,
                         status,
+                        &format!("{} staged", count(changes, "change")),
+                        "Highlighted text becomes new nodes when applied, or switches the \
+                         path to a branch that already holds it. A red underline marks the \
+                         character beside removed text. Shaded bands show where the existing \
+                         nodes meet.",
                         "Active path changed; staged edit is stale",
                         "The staged text no longer matches the path it was typed on. Restore \
                          path makes that path active again so the edit applies; otherwise \
@@ -754,6 +898,31 @@ impl EditorState {
                 ui.weak(crumbs.join(" → "));
 
                 if editable {
+                    // Shown while the buffer is empty, which means different things
+                    // depending on whether typing removed the text.
+                    let hint = match status {
+                        BufferStatus::Clean => {
+                            "The active path has no text yet. Type here, then Apply to add \
+                             it to the document."
+                        }
+                        BufferStatus::Staged => {
+                            "All text removed. Apply to take it off the active path (it \
+                             stays on an alternate branch), or Reset to bring it back."
+                        }
+                        BufferStatus::Stale => {
+                            "All text removed, but the path changed underneath the edit. \
+                             Restore path to keep the removal, or Reset to reload the path."
+                        }
+                    };
+                    // The layouter previews the staged edit over the text. It is called
+                    // with the buffer as it stands during this frame, so the preview is
+                    // cached by its inputs rather than computed once per frame.
+                    let original = &self.reading_original_text;
+                    let cache = &mut self.reading_preview;
+                    let mut layouter = |ui: &egui::Ui, text: &dyn TextBuffer, wrap_width: f32| {
+                        let preview = cache.get(original, text.as_str(), &node_lengths);
+                        preview_layout(ui, text.as_str(), preview, wrap_width)
+                    };
                     // The editor grows with its text, so it scrolls inside the panel.
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -762,7 +931,9 @@ impl EditorState {
                                 egui::TextEdit::multiline(&mut self.reading_buffer)
                                     .id(editor_id)
                                     .desired_width(f32::INFINITY)
-                                    .desired_rows(5),
+                                    .desired_rows(5)
+                                    .hint_text(hint)
+                                    .layouter(&mut layouter),
                             );
                         });
                     if apply {
@@ -1138,6 +1309,79 @@ impl eframe::App for DemoApp {
 mod tests {
     use super::*;
     use crate::document::{seeded_collaborative, seeded_independent, synchronize_pair};
+
+    #[test]
+    fn preview_layout_highlights_changes_shades_nodes_and_marks_removals() {
+        /// The text of each laid-out section that satisfies `predicate`.
+        fn sections<'a>(
+            galley: &egui::Galley,
+            text: &'a str,
+            predicate: impl Fn(&TextFormat) -> bool,
+        ) -> Vec<&'a str> {
+            galley
+                .job
+                .sections
+                .iter()
+                .filter(|section| predicate(&section.format))
+                .map(|section| &text[section.byte_range.start.0..section.byte_range.end.0])
+                .collect()
+        }
+
+        egui::__run_test_ui(|ui| {
+            // A replaced word and appended punctuation are highlighted; the unchanged
+            // text alternates shading at each node boundary that survives.
+            let edited = "one 2 three!";
+            let preview = preview_edit("one two three", edited, &[4, 4, 5]);
+            let galley = preview_layout(ui, edited, &preview, f32::INFINITY);
+            assert_eq!(galley.job.text, edited);
+            assert_eq!(
+                sections(&galley, edited, |format| format.background
+                    == change_highlight()),
+                vec!["2", "!"]
+            );
+            assert_eq!(
+                sections(&galley, edited, |format| {
+                    format.background != Color32::TRANSPARENT
+                        && format.background != change_highlight()
+                }),
+                vec![" "]
+            );
+            assert!(
+                sections(&galley, edited, |format| format.underline != Stroke::NONE).is_empty()
+            );
+
+            // Removed text underlines the character beside it.
+            let edited = "one";
+            let preview = preview_edit("one two", edited, &[4, 3]);
+            let galley = preview_layout(ui, edited, &preview, f32::INFINITY);
+            assert_eq!(galley.job.text, edited);
+            assert_eq!(
+                sections(&galley, edited, |format| format.underline == REMOVAL_MARK),
+                vec!["e"]
+            );
+
+            // An emptied buffer lays out like plain empty text.
+            let preview = preview_edit("gone", "", &[4]);
+            let galley = preview_layout(ui, "", &preview, f32::INFINITY);
+            assert_eq!(galley.job.text, "");
+            assert_eq!(galley.job.sections.len(), 1);
+        });
+    }
+
+    #[test]
+    fn preview_cache_recomputes_only_when_its_inputs_change() {
+        let mut cache = PreviewCache::default();
+        let original = "one two three";
+        let first = cache.get(original, "one 2 three", &[4, 4, 5]).clone();
+        assert_eq!(first.changes, 1);
+        assert_eq!(cache.get(original, "one 2 three", &[4, 4, 5]), &first);
+        // The appended "!" is a second change, separated from the first by " three".
+        assert_eq!(cache.get(original, "one 2 three!", &[4, 4, 5]).changes, 2);
+        assert_eq!(cache.get(original, original, &[4, 4, 5]).changes, 0);
+        // The node lengths shape the spans even when the texts are unchanged.
+        assert_eq!(cache.get(original, original, &[13]).spans.len(), 1);
+        assert_eq!(cache.get(original, original, &[4, 4, 5]).spans.len(), 3);
+    }
 
     #[test]
     fn collaborative_ids_use_disjoint_odd_even_sequences_above_maximum() {
