@@ -60,6 +60,17 @@ pub enum Document {
     DependentLoro(Box<LoggedCollaborative>),
 }
 
+/// What an applied active-path edit changed, for status reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathEditSummary {
+    /// The number of changed ranges applied as separate path patches.
+    pub hunks: usize,
+    /// The number of nodes created by splitting and inserting.
+    pub created_nodes: usize,
+    /// The node on the new active path at the first change, for the inspector to select.
+    pub focus: Option<u64>,
+}
+
 /// A snapshot of a single node's state, for the inspector panel.
 pub struct NodeInfo {
     pub parents: Vec<u64>,
@@ -346,6 +357,8 @@ impl Document {
     /// nodes consume identifiers from the editor's existing arithmetic sequence.
     /// The operation is prepared on a clone so identifier errors cannot leave a
     /// partially applied structural patch behind.
+    ///
+    /// Returns `None` when the texts are identical and nothing was applied.
     pub fn replace_active_path_text(
         &mut self,
         expected_path: &[u64],
@@ -353,7 +366,7 @@ impl Document {
         edited_text: &str,
         next_id: &mut u64,
         id_step: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<PathEditSummary>, String> {
         let (current_path, current_text) = self.active_path_text();
         if current_path != expected_path || current_text != expected_text {
             return Err(
@@ -362,7 +375,7 @@ impl Document {
             );
         }
         if expected_text == edited_text {
-            return Ok(false);
+            return Ok(None);
         }
 
         let Self::Independent(weave) = self else {
@@ -372,6 +385,8 @@ impl Document {
         };
 
         let hunks = text_hunks(expected_text, edited_text);
+        let hunk_count = hunks.len();
+        let first_change = hunks.first().map(|hunk| hunk.new.start);
         let apply = |target: &mut PatchableIndependent, generate_id: &mut dyn FnMut() -> u64| {
             // Later hunks first, so the byte offsets of earlier hunks stay valid.
             for hunk in hunks.iter().rev() {
@@ -427,7 +442,32 @@ impl Document {
             *next_id = last.saturating_add(id_step);
         }
         **weave = patched;
-        Ok(true)
+        let focus = first_change.and_then(|offset| self.node_at_offset(offset));
+        Ok(Some(PathEditSummary {
+            hunks: hunk_count,
+            created_nodes: demanded,
+            focus,
+        }))
+    }
+
+    /// The node on the active path whose text contains byte `offset`, or the last
+    /// non-empty node when the offset is at the end of the path.
+    fn node_at_offset(&mut self, offset: usize) -> Option<u64> {
+        let path = self.active_path();
+        let mut cursor = 0_usize;
+        let mut last = None;
+        for id in path.iter().rev() {
+            let length = self.node_contents(id).map_or(0, |text| text.len());
+            if length == 0 {
+                continue;
+            }
+            if offset < cursor + length {
+                return Some(*id);
+            }
+            cursor += length;
+            last = Some(*id);
+        }
+        last.or_else(|| path.first().copied())
     }
 
     /// The tip of the active path, if any.
@@ -701,7 +741,11 @@ struct TextHunk {
 /// Unchanged text between changes is left in place rather than folded into one
 /// large replacement. Where a change could sit at several equivalent positions,
 /// such as an inserted repeated word, it is aligned to the nearest word, sentence,
-/// or line boundary so the resulting node contents stay readable.
+/// or line boundary. A change that starts or ends inside a word is then widened to
+/// the whole word, and changes that meet are merged, so the old and new branches
+/// hold complete words rather than fragments such as `ue` and `hur`. Punctuation is
+/// a boundary unless it joins two word characters, so `Tuesday.` becoming
+/// `Thursday.` replaces only the word, while `don't` is widened as one word.
 fn text_hunks(original: &str, edited: &str) -> Vec<TextHunk> {
     let mut hunks = Vec::new();
     let mut pending: Option<TextHunk> = None;
@@ -736,7 +780,99 @@ fn text_hunks(original: &str, edited: &str) -> Vec<TextHunk> {
 
     debug_assert_eq!(old_cursor, original.len());
     debug_assert_eq!(new_cursor, edited.len());
-    hunks
+    widen_to_words(original, edited, &hunks)
+}
+
+/// Whether the character starting at byte `at` of `text` belongs to a word.
+///
+/// Alphanumeric characters always do. Any other non-whitespace character does only
+/// when it joins two alphanumeric characters, such as the apostrophe in `don't`, the
+/// hyphen in `well-known`, or the point in `3.14`. Punctuation at the edge of a word
+/// or next to whitespace is a boundary.
+fn is_word_at(text: &str, at: usize) -> bool {
+    let Some(character) = text[at..].chars().next() else {
+        return false;
+    };
+    if character.is_alphanumeric() {
+        return true;
+    }
+    if character.is_whitespace() {
+        return false;
+    }
+    let previous = text[..at].chars().next_back();
+    let next = text[at + character.len_utf8()..].chars().next();
+    previous.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric)
+}
+
+/// Whether the character ending at byte `at` of `text` belongs to a word.
+fn is_word_ending_at(text: &str, at: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|character| is_word_at(text, at - character.len_utf8()))
+}
+
+/// Widens hunks whose boundaries fall inside a word out to the surrounding word
+/// boundaries, then merges hunks that touch or overlap.
+///
+/// The unchanged text around a hunk is identical in both strings, so the character
+/// on the shared side of a boundary is the same in `original` and `edited` and a
+/// boundary can move over it in both. Only that character's neighbours, and so its
+/// punctuation context, can differ, which is why each check consults both texts.
+/// A boundary is inside a word when a word character sits on one side of it and
+/// another follows on the other side in either the old or the new text.
+fn widen_to_words(original: &str, edited: &str, hunks: &[TextHunk]) -> Vec<TextHunk> {
+    let before = |at: usize| original[..at].chars().next_back();
+    let after = |at: usize| original[at..].chars().next();
+    let shared_word_before = |old_at: usize, new_at: usize| {
+        is_word_ending_at(original, old_at) || is_word_ending_at(edited, new_at)
+    };
+    let shared_word_after =
+        |old_at: usize, new_at: usize| is_word_at(original, old_at) || is_word_at(edited, new_at);
+
+    let mut widened: Vec<TextHunk> = Vec::with_capacity(hunks.len());
+    for (index, hunk) in hunks.iter().enumerate() {
+        let mut hunk = hunk.clone();
+
+        if shared_word_before(hunk.old.start, hunk.new.start)
+            && (is_word_at(original, hunk.old.start) || is_word_at(edited, hunk.new.start))
+        {
+            let floor = index
+                .checked_sub(1)
+                .map_or(0, |previous| hunks[previous].old.end);
+            while hunk.old.start > floor
+                && let Some(character) = before(hunk.old.start)
+                && shared_word_before(hunk.old.start, hunk.new.start)
+            {
+                hunk.old.start -= character.len_utf8();
+                hunk.new.start -= character.len_utf8();
+            }
+        }
+        if shared_word_after(hunk.old.end, hunk.new.end)
+            && (is_word_ending_at(original, hunk.old.end)
+                || is_word_ending_at(edited, hunk.new.end))
+        {
+            let ceiling = hunks
+                .get(index + 1)
+                .map_or(original.len(), |next| next.old.start);
+            while hunk.old.end < ceiling
+                && let Some(character) = after(hunk.old.end)
+                && shared_word_after(hunk.old.end, hunk.new.end)
+            {
+                hunk.old.end += character.len_utf8();
+                hunk.new.end += character.len_utf8();
+            }
+        }
+
+        match widened.last_mut() {
+            Some(previous) if hunk.old.start <= previous.old.end => {
+                previous.old.end = previous.old.end.max(hunk.old.end);
+                previous.new.end = previous.new.end.max(hunk.new.end);
+            }
+            _ => widened.push(hunk),
+        }
+    }
+    widened
 }
 
 /// Indicates which peer incorporated remote changes during a synchronization pass.
@@ -962,6 +1098,15 @@ mod tests {
         document
             .replace_active_path_text(&path, &text, edited, next_id, 1)
             .unwrap()
+            .is_some()
+    }
+
+    /// The old and new text of every hunk between `original` and `edited`.
+    fn hunk_texts<'a>(original: &'a str, edited: &'a str) -> Vec<(&'a str, &'a str)> {
+        text_hunks(original, edited)
+            .into_iter()
+            .map(|hunk| (&original[hunk.old], &edited[hunk.new]))
+            .collect()
     }
 
     /// The identifier of the one node whose contents equal `contents`.
@@ -1098,10 +1243,10 @@ mod tests {
         let mut document = independent_chain(&["hello world"]);
         let mut next_id = 10;
         let edits = [
-            "hello Aworld",
-            "hello BAworld",
-            "hello CBAworld",
-            "hello DCBAworld",
+            "hello A world",
+            "hello B A world",
+            "hello C B A world",
+            "hello D C B A world",
         ];
         for (round, edited) in edits.into_iter().enumerate() {
             assert!(replace(&mut document, edited, &mut next_id));
@@ -1109,8 +1254,8 @@ mod tests {
             // One edge joins the original halves; each insertion adds exactly two more.
             assert_eq!(edge_count(&document), 1 + 2 * (round + 1));
         }
-        // Each inserted letter continues only into the letter inserted before it.
-        let (latest, previous) = (find(&document, "D"), find(&document, "C"));
+        // Each inserted word continues only into the word inserted before it.
+        let (latest, previous) = (find(&document, "D "), find(&document, "C "));
         assert_eq!(
             document.node_info(&latest).unwrap().children,
             vec![previous]
@@ -1201,21 +1346,152 @@ mod tests {
                 },
             ]
         );
-        // Pure insertion and pure deletion, including multi-byte characters.
+        // Whole-word replacement, insertion, and deletion with multi-byte characters.
         assert_eq!(
-            text_hunks("aé🙂z", "aé🙂🦀z"),
+            text_hunks("aé 🙂 z", "aé 🦀 z"),
             vec![TextHunk {
-                old: 7..7,
-                new: 7..11
+                old: 4..8,
+                new: 4..8
             }]
         );
         assert_eq!(
-            text_hunks("aé🙂z", "az"),
+            text_hunks("aé z", "aé z 🙂"),
             vec![TextHunk {
-                old: 1..7,
-                new: 1..1
+                old: 5..5,
+                new: 5..10
             }]
         );
+        assert_eq!(
+            text_hunks("aé 🙂 z", "aé 🙂"),
+            vec![TextHunk {
+                old: 8..10,
+                new: 8..8
+            }]
+        );
+    }
+
+    #[test]
+    fn text_hunks_widen_partial_word_changes_to_whole_words() {
+        // A change inside a word covers the whole word on both branches.
+        assert_eq!(
+            hunk_texts(
+                "The letter came on a Tuesday.",
+                "The letter came on a Thursday."
+            ),
+            vec![("Tuesday", "Thursday")]
+        );
+        // Adjacent changes inside one word merge into a single hunk.
+        assert_eq!(
+            hunk_texts("teh cat sat", "the cat sat"),
+            vec![("teh", "the")]
+        );
+        // Continuing a partial word replaces it with the finished word.
+        assert_eq!(hunk_texts("The cat sa", "The cat sat"), vec![("sa", "sat")]);
+        assert_eq!(
+            hunk_texts("hello world", "hello worlds"),
+            vec![("world", "worlds")]
+        );
+        // Changes that already sit on whitespace boundaries are left alone.
+        assert_eq!(
+            hunk_texts("hello cruel world", "hello kind world"),
+            vec![("cruel", "kind")]
+        );
+        assert_eq!(
+            hunk_texts("hello world", "hello wide world"),
+            vec![("", "wide ")]
+        );
+        assert_eq!(
+            hunk_texts("line one\nline two\n", "line one\nline 2\nline three\n"),
+            vec![("two", "2\nline three")]
+        );
+        // Widening moves over whole multi-byte characters.
+        assert_eq!(hunk_texts("aé🙂z ok", "aê🦀z ok"), vec![("aé🙂z", "aê🦀z")]);
+    }
+
+    #[test]
+    fn text_hunks_treat_punctuation_as_a_boundary_unless_it_joins_a_word() {
+        // Punctuation after a word stays shared instead of joining the replaced word.
+        assert_eq!(
+            hunk_texts("It rained on Tuesday.", "It rained on Thursday."),
+            vec![("Tuesday", "Thursday")]
+        );
+        assert_eq!(hunk_texts("(hello)", "(hi)"), vec![("hello", "hi")]);
+        // Adding or changing punctuation next to a word does not replace the word.
+        assert_eq!(hunk_texts("hello world", "hello world!"), vec![("", "!")]);
+        assert_eq!(hunk_texts("hello world.", "hello world?"), vec![(".", "?")]);
+        assert_eq!(hunk_texts("hello, world", "hello; world"), vec![(",", ";")]);
+        // Punctuation joining two word characters belongs to the word.
+        assert_eq!(
+            hunk_texts("I don't know", "I didn't know"),
+            vec![("don't", "didn't")]
+        );
+        assert_eq!(
+            hunk_texts("a well-known fact", "a well known fact"),
+            vec![("well-known", "well known")]
+        );
+        assert_eq!(
+            hunk_texts("pi is 3.14", "pi is 3.15"),
+            vec![("3.14", "3.15")]
+        );
+        // The joining rule applies in whichever text the character joins a word.
+        assert_eq!(hunk_texts("see a.", "see a.b"), vec![("a.", "a.b")]);
+        // Symbols such as emoji follow the same rule as punctuation.
+        assert_eq!(hunk_texts("hi🙂", "hi🦀"), vec![("🙂", "🦀")]);
+        assert_eq!(hunk_texts("hi 🙂 there", "hi 🦀 there"), vec![("🙂", "🦀")]);
+    }
+
+    #[test]
+    fn partial_word_edits_replace_whole_words() {
+        let mut document = independent_chain(&["The letter came on a Tuesday."]);
+        let mut next_id = 10;
+        assert!(replace(
+            &mut document,
+            "The letter came on a Thursday.",
+            &mut next_id
+        ));
+        assert_eq!(
+            document.active_path_text().1,
+            "The letter came on a Thursday."
+        );
+        let (head, old, new, period) = (
+            find(&document, "The letter came on a "),
+            find(&document, "Tuesday"),
+            find(&document, "Thursday"),
+            find(&document, "."),
+        );
+        assert_eq!(document.node_info(&old).unwrap().parents, vec![head]);
+        assert_eq!(document.node_info(&new).unwrap().parents, vec![head]);
+        assert_eq!(document.node_info(&old).unwrap().children, vec![period]);
+        assert_eq!(document.node_info(&new).unwrap().children, vec![period]);
+        assert!(!document.node_info(&old).unwrap().active);
+        assert!(document.node_info(&new).unwrap().active);
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn applied_edits_report_their_size_and_first_change() {
+        let mut document = independent_chain(&["one two three"]);
+        let (path, text) = document.active_path_text();
+        let mut next_id = 10;
+        let summary = document
+            .replace_active_path_text(&path, &text, "ONE two THREE", &mut next_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.hunks, 2);
+        assert_eq!(summary.created_nodes, document.len() - 1);
+        assert_eq!(summary.focus, Some(find(&document, "ONE")));
+
+        // A deletion at the end focuses the text that now ends the path.
+        let (path, text) = document.active_path_text();
+        let nodes = document.len();
+        let summary = document
+            .replace_active_path_text(&path, &text, "ONE two", &mut next_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.hunks, 1);
+        assert_eq!(summary.created_nodes, document.len() - nodes);
+        assert_eq!(summary.focus, Some(find(&document, " two")));
+        assert!(document.is_valid());
     }
 
     #[test]
@@ -1225,9 +1501,10 @@ mod tests {
         let action_count = document.action_count();
         let mut next_id = 10;
         assert!(
-            !document
+            document
                 .replace_active_path_text(&path, &text, &text, &mut next_id, 1)
                 .unwrap()
+                .is_none()
         );
         assert_eq!(document.action_count(), action_count);
         assert_eq!(next_id, 10);

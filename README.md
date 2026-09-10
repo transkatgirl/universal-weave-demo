@@ -37,18 +37,26 @@ central canvas renders a scrollable topological 2D graph; click a node to select
 it and double-click it to change its active state.
 
 For independent DAG documents, the reading view is also an active-path editor.
-Typing is staged locally until **Apply** is clicked, then a character-level diff
-turns each changed range into its own structural path patch. Patches are applied
-from the end of the text backwards, so unchanged text between two changes stays
-a single node shared by the old and new branches. Where a change could sit at
-several equivalent positions, such as an inserted repeated word, it is aligned
-to the nearest word, sentence, or line boundary so node contents stay readable.
-Text removed or replaced by a patch is preserved on alternate DAG branches
-instead of being destroyed, and inserted text continues only into the active
-path, never into the text it replaced. **Reset** discards staged typing and
+Typing is staged locally until **Apply** is clicked or Ctrl+Enter (⌘+Enter on
+macOS) is pressed in the editor, then a character-level diff turns each changed
+range into its own structural path patch. A change that starts or ends inside a
+word is widened to the whole word, so the old and new branches hold complete
+words rather than fragments. Punctuation counts as a boundary unless it joins
+two word characters, as in "don't" or "well-known", so changing a word leaves
+its trailing punctuation shared. Patches are applied from the end of the text
+backwards, so unchanged text between two changes stays a single node shared by
+the old and new branches. Where a change could sit at several equivalent
+positions, such as an inserted repeated word, it is aligned to the nearest word,
+sentence, or line boundary. Text removed or replaced by a patch is preserved on
+alternate DAG branches instead of being destroyed, and inserted text continues
+only into the active path, never into the text it replaced. After applying, the
+status bar reports how many changes and nodes were created and the inspector
+selects the node at the first change. **Reset** discards staged typing and
 reloads the current path. If a structural operation changes the path while an
-edit is staged, Apply rejects the stale edit until the buffer is reset.
-Dependent and Loro reading views remain read-only.
+edit is staged, the reading view marks the staged edit as stale and disables
+Apply until the buffer is reset. Opening or creating a document while edits are
+unapplied asks for confirmation, and saving warns that unapplied edits are not
+part of the saved file. Dependent and Loro reading views remain read-only.
 
 Creating a `DependentLoroWeave` opens a second peer window. The two local peers
 can be taken offline, edited independently, and reconnected to demonstrate

@@ -2,12 +2,32 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
 
 use crate::document::{Document, SyncOutcome, WeaveKind, seeded_dependent, synchronize_pair};
 use crate::{persistence, tree_view};
 
 const PEER_B_VIEWPORT: &str = "collaborative_peer_b";
+
+/// Applies a staged active-path edit while the reading-view editor has keyboard focus.
+const APPLY_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
+
+/// Whether the active-path editor holds typing that can still be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadingStatus {
+    /// The buffer matches the active path.
+    Clean,
+    /// The buffer holds typing that can be applied to the path it was staged on.
+    Staged,
+    /// The active path changed under staged typing, so the edit no longer applies.
+    Stale,
+}
+
+/// Formats a quantity with its noun, such as "1 change" or "3 nodes".
+fn count(quantity: usize, noun: &str) -> String {
+    let suffix = if quantity == 1 { "" } else { "s" };
+    format!("{quantity} {noun}{suffix}")
+}
 
 #[derive(Default)]
 struct EditorOutput {
@@ -75,17 +95,27 @@ impl EditorState {
         self.reading_buffer != self.reading_original_text
     }
 
-    /// Refreshes a clean reading buffer while preserving staged typing. A dirty
-    /// buffer keeps its snapshot so Apply can detect that the path became stale.
-    fn sync_reading_buffer(&mut self) {
-        if self.document.kind() != WeaveKind::Independent || self.reading_is_dirty() {
-            return;
+    /// Refreshes a clean reading buffer and reports whether staged typing still applies.
+    ///
+    /// A dirty buffer keeps its snapshot, so typing survives structural operations and
+    /// the editor can show that the path changed underneath it.
+    fn sync_reading_buffer(&mut self) -> ReadingStatus {
+        if self.document.kind() != WeaveKind::Independent {
+            return ReadingStatus::Clean;
         }
         let (path, text) = self.document.active_path_text();
-        if path != self.reading_original_path || text != self.reading_original_text {
-            self.reading_original_path = path;
-            self.reading_original_text = text.clone();
-            self.reading_buffer = text;
+        let path_changed = path != self.reading_original_path || text != self.reading_original_text;
+        match (self.reading_is_dirty(), path_changed) {
+            (true, true) => ReadingStatus::Stale,
+            (true, false) => ReadingStatus::Staged,
+            (false, changed) => {
+                if changed {
+                    self.reading_original_path = path;
+                    self.reading_original_text = text.clone();
+                    self.reading_buffer = text;
+                }
+                ReadingStatus::Clean
+            }
         }
     }
 
@@ -105,18 +135,41 @@ impl EditorState {
             &mut self.next_id,
             self.id_step,
         ) {
-            Ok(true) => {
+            Ok(Some(summary)) => {
                 let (path, text) = self.document.active_path_text();
                 self.reading_original_path = path;
                 self.reading_original_text = text.clone();
                 self.reading_buffer = text;
-                self.status =
-                    "Applied active-path edit; replaced content remains on alternate branches"
-                        .to_string();
+                // Show the first change in the inspector, unless that would discard typing there.
+                if let Some(id) = summary.focus
+                    && !self.edit_is_dirty()
+                {
+                    self.selected = Some(id);
+                    self.edit_for = None;
+                }
+                self.status = format!(
+                    "Applied {} to the active path, creating {}; replaced text remains on alternate branches",
+                    count(summary.hunks, "change"),
+                    count(summary.created_nodes, "node")
+                );
             }
-            Ok(false) => self.status = "Active-path edit is unchanged".to_string(),
+            Ok(None) => self.status = "Active-path edit is unchanged".to_string(),
             Err(error) => self.status = error,
         }
+    }
+
+    /// Typed input that has not been applied to the document yet.
+    fn unapplied_edits(&self) -> Vec<String> {
+        let mut pending = Vec::new();
+        if self.reading_is_dirty() {
+            pending.push("a staged active-path edit".to_string());
+        }
+        if self.edit_is_dirty()
+            && let Some(id) = self.edit_for
+        {
+            pending.push(format!("an unapplied edit to node #{id}"));
+        }
+        pending
     }
 
     /// Refreshes imported state without overwriting locally typed, unapplied text.
@@ -454,10 +507,71 @@ impl EditorState {
             .resizable(true)
             .default_size(170.0)
             .show(ui, |ui| {
-                ui.heading("Reading view");
+                let editable = self.document.kind() == WeaveKind::Independent;
+                let status = if editable {
+                    self.sync_reading_buffer()
+                } else {
+                    ReadingStatus::Clean
+                };
+                let editor_id = ui.make_persistent_id("active_path_editor");
+                // The shortcut fires only while the editor itself has keyboard focus, so it
+                // never takes Enter away from the inspector or the title field.
+                let mut apply = status == ReadingStatus::Staged
+                    && ui.memory(|memory| memory.has_focus(editor_id))
+                    && ui.input_mut(|input| input.consume_shortcut(&APPLY_SHORTCUT));
+                let mut reset = false;
+
+                // The controls live in the heading row so a long path can never push them
+                // out of the panel.
+                ui.horizontal(|ui| {
+                    ui.heading("Reading view");
+                    if !editable {
+                        return;
+                    }
+                    ui.separator();
+                    match status {
+                        ReadingStatus::Clean => {
+                            ui.weak("No staged changes");
+                        }
+                        ReadingStatus::Staged => {
+                            ui.label(
+                                RichText::new("● Staged changes")
+                                    .color(Color32::YELLOW)
+                                    .strong(),
+                            );
+                        }
+                        ReadingStatus::Stale => {
+                            ui.label(
+                                RichText::new("⚠ Active path changed; staged edit is stale")
+                                    .color(Color32::LIGHT_RED)
+                                    .strong(),
+                            )
+                            .on_hover_text(
+                                "The staged text no longer matches the path it was typed on. \
+                                 Copy anything you want to keep, then Reset to reload the path.",
+                            );
+                        }
+                    }
+                    let shortcut = ui.ctx().format_shortcut(&APPLY_SHORTCUT);
+                    apply |= ui
+                        .add_enabled(
+                            status == ReadingStatus::Staged,
+                            egui::Button::new("Apply staged edit"),
+                        )
+                        .on_hover_text(format!(
+                            "{shortcut} — turns each changed range into a branch-preserving \
+                             path patch; replaced text stays on alternate branches."
+                        ))
+                        .clicked();
+                    reset = ui
+                        .add_enabled(status != ReadingStatus::Clean, egui::Button::new("Reset"))
+                        .on_hover_text("Discard staged typing and reload the current active path.")
+                        .clicked();
+                });
                 ui.separator();
+
                 let path = self.document.active_path();
-                if path.is_empty() && self.document.kind() != WeaveKind::Independent {
+                if path.is_empty() && !editable {
                     ui.weak("No active node. Double-click a node or use “Set active”.");
                     return;
                 }
@@ -470,38 +584,24 @@ impl EditorState {
                     last.push_str(" (active)");
                 }
                 ui.weak(crumbs.join(" → "));
-                if self.document.kind() == WeaveKind::Independent {
-                    self.sync_reading_buffer();
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.reading_buffer)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(5),
-                    );
-                    let staged = self.reading_is_dirty();
-                    ui.horizontal(|ui| {
-                        if staged {
-                            ui.label(
-                                RichText::new("● Staged changes")
-                                    .color(Color32::YELLOW)
-                                    .strong(),
+
+                if editable {
+                    // The editor grows with its text, so it scrolls inside the panel.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.reading_buffer)
+                                    .id(editor_id)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(5),
                             );
-                        } else {
-                            ui.weak("No staged changes");
-                        }
-                        if ui
-                            .add_enabled(staged, egui::Button::new("Apply staged edit"))
-                            .clicked()
-                        {
-                            self.apply_reading_buffer();
-                        }
-                        if ui
-                            .add_enabled(staged, egui::Button::new("Reset"))
-                            .clicked()
-                        {
-                            self.reset_reading_buffer();
-                        }
-                    });
-                    ui.weak("Typing is staged locally; applying turns each changed range into a branch-preserving path patch.");
+                        });
+                    if apply {
+                        self.apply_reading_buffer();
+                    } else if reset {
+                        self.reset_reading_buffer();
+                    }
                 } else {
                     let text = path
                         .iter()
@@ -680,12 +780,60 @@ impl DemoApp {
         }
     }
 
+    /// Typed input in either peer that has not been applied to its document.
+    fn unapplied_edits(&self) -> Vec<String> {
+        let Some(peer_b) = &self.peer_b else {
+            return self.peer_a.unapplied_edits();
+        };
+        let attribute = |edits: Vec<String>, peer: &'static str| {
+            edits
+                .into_iter()
+                .map(move |edit| format!("{edit} in {peer}"))
+        };
+        attribute(self.peer_a.unapplied_edits(), "Peer A")
+            .chain(attribute(peer_b.unapplied_edits(), "Peer B"))
+            .collect()
+    }
+
+    /// Asks before an action that would leave unapplied edits behind, returning whether
+    /// to proceed. A declined action is reported in the status bar.
+    fn confirm_despite_unapplied_edits(&mut self, action: &str, question: &str) -> bool {
+        let pending = self.unapplied_edits();
+        if pending.is_empty() {
+            return true;
+        }
+        let proceed = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title(format!("{action} with unapplied edits?"))
+            .set_description(format!("Unapplied: {}.\n\n{question}", pending.join("; ")))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes;
+        if !proceed {
+            self.peer_a.status =
+                format!("{action} cancelled; apply or reset the unapplied edits first");
+        }
+        proceed
+    }
+
     fn new_document(&mut self) {
+        if !self.confirm_despite_unapplied_edits(
+            "Create",
+            "Creating a new document discards them. Discard the edits and continue?",
+        ) {
+            return;
+        }
         let document = Document::empty(self.new_kind);
         self.replace_session(document, format!("New {} document", self.new_kind.label()));
     }
 
     fn open_document(&mut self) {
+        if !self.confirm_despite_unapplied_edits(
+            "Open",
+            "Opening another document discards them. Discard the edits and choose a file?",
+        ) {
+            return;
+        }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Universal Weave demo", &["uweave"])
             .pick_file()
@@ -699,6 +847,12 @@ impl DemoApp {
     }
 
     fn save_document(&mut self) {
+        if !self.confirm_despite_unapplied_edits(
+            "Save",
+            "The saved file will not include them. Save the document without them?",
+        ) {
+            return;
+        }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Universal Weave demo", &["uweave"])
             .set_file_name("document.uweave")
@@ -882,39 +1036,119 @@ mod tests {
     }
 
     #[test]
-    fn dirty_reading_buffer_is_preserved_then_rejected_if_stale_until_reset() {
+    fn dirty_reading_buffer_is_preserved_and_flagged_stale_until_reset() {
         let document = seeded_independent();
         let mut editor = EditorState::new(document, 5, 1, String::new());
         editor.reading_buffer.push_str("local typing");
         let staged = editor.reading_buffer.clone();
+        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Staged);
 
         assert!(editor.document.set_active(&4));
-        editor.sync_reading_buffer();
+        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Stale);
         assert_eq!(editor.reading_buffer, staged);
 
+        // The document still rejects the stale edit if Apply is forced.
         editor.apply_reading_buffer();
         assert!(editor.status.contains("changed while this edit was staged"));
         assert_eq!(editor.reading_buffer, staged);
 
         editor.reset_reading_buffer();
+        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Clean);
         assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
         assert!(!editor.reading_is_dirty());
     }
 
     #[test]
-    fn reading_buffer_apply_and_noop_refresh_the_snapshot() {
+    fn reading_buffer_apply_reports_selects_and_noop_refreshes_the_snapshot() {
         let document = seeded_independent();
         let mut editor = EditorState::new(document, 5, 1, String::new());
-        editor.reading_buffer.push_str("new ending");
+        editor.reading_buffer.push_str(" new ending");
         editor.apply_reading_buffer();
-
         assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
         assert_eq!(editor.reading_buffer, editor.reading_original_text);
         assert!(!editor.reading_is_dirty());
-        let actions = editor.document.action_count();
+        assert_eq!(editor.sync_reading_buffer(), ReadingStatus::Clean);
+        assert!(
+            editor
+                .status
+                .starts_with("Applied 1 change to the active path, creating 1 node;"),
+            "{}",
+            editor.status
+        );
+        let selected = editor.selected.expect("the inserted node is selected");
+        assert_eq!(
+            editor.document.node_contents(&selected).as_deref(),
+            Some(" new ending")
+        );
 
+        let actions = editor.document.action_count();
         editor.apply_reading_buffer();
         assert_eq!(editor.status, "Active-path edit is unchanged");
         assert_eq!(editor.document.action_count(), actions);
+    }
+
+    #[test]
+    fn applying_keeps_a_dirty_inspector_selection() {
+        let document = seeded_independent();
+        let mut editor = EditorState::new(document, 5, 1, String::new());
+        editor.selected = Some(1);
+        editor.sync_edit_buffer();
+        editor.edit_buffer.push_str(" unapplied");
+        editor.reading_buffer.push_str(" new ending");
+        editor.apply_reading_buffer();
+        assert_eq!(editor.selected, Some(1));
+        assert!(editor.edit_buffer.ends_with(" unapplied"));
+    }
+
+    #[test]
+    fn unapplied_edits_cover_staged_typing_and_inspector_edits() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        assert!(editor.unapplied_edits().is_empty());
+        editor.reading_buffer.push_str(" typing");
+        assert_eq!(
+            editor.unapplied_edits(),
+            vec!["a staged active-path edit".to_string()]
+        );
+        editor.selected = Some(3);
+        editor.sync_edit_buffer();
+        editor.edit_buffer.push_str(" more");
+        assert_eq!(
+            editor.unapplied_edits(),
+            vec![
+                "a staged active-path edit".to_string(),
+                "an unapplied edit to node #3".to_string()
+            ]
+        );
+        editor.reset_reading_buffer();
+        assert_eq!(
+            editor.unapplied_edits(),
+            vec!["an unapplied edit to node #3".to_string()]
+        );
+
+        let mut app = DemoApp {
+            peer_a: editor,
+            peer_b: None,
+            connected: false,
+            peer_b_open: false,
+            new_kind: WeaveKind::Independent,
+        };
+        assert_eq!(
+            app.unapplied_edits(),
+            vec!["an unapplied edit to node #3".to_string()]
+        );
+
+        // With two collaborative peers, edits are attributed to their peer.
+        let document = seeded_collaborative();
+        let mut peer_b =
+            EditorState::new(document.fork_collaborative().unwrap(), 6, 2, String::new());
+        peer_b.selected = Some(3);
+        peer_b.sync_edit_buffer();
+        peer_b.edit_buffer.push_str(" from B");
+        app.peer_a = EditorState::new(document, 5, 2, String::new());
+        app.peer_b = Some(peer_b);
+        assert_eq!(
+            app.unapplied_edits(),
+            vec!["an unapplied edit to node #3 in Peer B".to_string()]
+        );
     }
 }
