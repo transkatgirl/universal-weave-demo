@@ -68,6 +68,9 @@ pub struct PathEditSummary {
     pub hunks: usize,
     /// The number of nodes created by splitting and inserting.
     pub created_nodes: usize,
+    /// The number of changes satisfied by switching to a branch that already held the
+    /// new text, instead of creating nodes.
+    pub reused_branches: usize,
     /// The node on the new active path at the first change, for the inspector to select.
     pub focus: Option<u64>,
 }
@@ -360,6 +363,10 @@ impl Document {
     /// as a node just added from the inspector, fills that placeholder instead of
     /// inserting in front of it and leaving it dangling at the end of the path.
     ///
+    /// A change whose new text already exists as a branch at that position, for example
+    /// a word changed back to what it was before an earlier apply, switches the active
+    /// path to that branch (see [`reuse_branch`]) instead of adding a duplicate node.
+    ///
     /// `expected_path` and `expected_text` must still match the document. Generated
     /// nodes consume identifiers from the editor's existing arithmetic sequence.
     /// The operation is prepared on a clone so identifier errors cannot leave a
@@ -377,7 +384,7 @@ impl Document {
         let (current_path, current_text) = self.active_path_text();
         if current_path != expected_path || current_text != expected_text {
             return Err(
-                "Active path changed while this edit was staged; reset the buffer before applying"
+                "Active path changed while this edit was staged; restore the path or reset the buffer before applying"
                     .to_string(),
             );
         }
@@ -405,6 +412,7 @@ impl Document {
         let hunk_count = hunks.len();
         let first_change = hunks.first().map(|hunk| hunk.new.start);
         let apply = |target: &mut PatchableIndependent, generate_id: &mut dyn FnMut() -> u64| {
+            let mut reused = 0_usize;
             // Later hunks first, so the byte offsets of earlier hunks stay valid.
             for hunk in hunks.iter().rev() {
                 let replacement = &edited_text[hunk.new.clone()];
@@ -424,6 +432,10 @@ impl Document {
                     // A pure deletion only detaches the old range; `replace` would
                     // leave an empty node behind on the active path.
                     target.split_out(hunk.old.clone(), &mut *generate_id);
+                } else if reuse_branch(target, hunk.old.clone(), replacement) {
+                    // The new text already exists as a branch here, typically because
+                    // it is being changed back to what an earlier apply replaced.
+                    reused += 1;
                 } else {
                     // `prefix_all` stays false: the inserted node continues only into the
                     // active path, so it is never linked to the text it replaced and
@@ -436,13 +448,14 @@ impl Document {
                     );
                 }
             }
+            reused
         };
 
         // The wrapper's id callback is infallible, so measure the exact demand on a
         // throwaway clone (fed any unused ids) before touching the editor's sequence.
         let mut demanded = 0_usize;
         let mut unused = (0_u64..).filter(|id| !weave.contains(id));
-        apply(&mut (**weave).clone(), &mut || {
+        let rehearsed_reuse = apply(&mut (**weave).clone(), &mut || {
             demanded += 1;
             unused.next().expect("an unused identifier always exists")
         });
@@ -463,12 +476,13 @@ impl Document {
 
         let mut patched = (**weave).clone();
         let mut remaining = ids.iter().copied();
-        apply(&mut patched, &mut || {
+        let reused_branches = apply(&mut patched, &mut || {
             remaining
                 .next()
                 .expect("identifier demand was measured in advance")
         });
         debug_assert!(remaining.next().is_none());
+        debug_assert_eq!(reused_branches, rehearsed_reuse);
 
         if let Some(last) = ids.last() {
             *next_id = last.saturating_add(id_step);
@@ -478,6 +492,7 @@ impl Document {
         Ok(Some(PathEditSummary {
             hunks: hunk_count,
             created_nodes: demanded,
+            reused_branches,
             focus,
         }))
     }
@@ -505,6 +520,47 @@ impl Document {
     /// The tip of the active path, if any.
     pub fn active_tip(&mut self) -> Option<u64> {
         self.active_path().first().copied()
+    }
+
+    /// Whether `path`, ordered tip to root as [`Self::active_path`] returns it, still
+    /// names a chain of existing nodes that ends at a root, so it can be made active
+    /// again. An empty path can always be restored by deactivating every node.
+    pub fn can_restore_path(&self, path: &[u64]) -> bool {
+        path.last().is_none_or(|root| {
+            self.node_info(root)
+                .is_some_and(|info| info.parents.is_empty())
+        }) && path.windows(2).all(|pair| {
+            self.node_info(&pair[0])
+                .is_some_and(|info| info.parents.contains(&pair[1]))
+        })
+    }
+
+    /// Makes `path` (tip to root) the active path again, for example to resume a staged
+    /// edit after a structural operation moved the active path elsewhere.
+    ///
+    /// Tree documents derive the path from its tip, so activating the tip restores it.
+    pub fn restore_path(&mut self, path: &[u64]) -> Result<(), String> {
+        if !self.can_restore_path(path) {
+            return Err(
+                "The previous path can no longer be restored; some of its nodes were removed or moved"
+                    .to_string(),
+            );
+        }
+        if let Self::Independent(weave) = self {
+            weave.set_active_path(path.iter().copied());
+            return Ok(());
+        }
+        match path.first() {
+            Some(tip) => {
+                self.set_active(tip);
+            }
+            None => {
+                if let Some(tip) = self.active_tip() {
+                    self.set_inactive(&tip);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Adds a new active root node with the given id.
@@ -755,6 +811,105 @@ impl Document {
             _ => Err("only collaborative documents have a Loro snapshot".to_string()),
         }
     }
+}
+
+/// The active path from root to tip, and the byte offset at which each node's text
+/// starts; the final offset is the length of the whole path text.
+fn path_layout(weave: &mut PatchableIndependent) -> (Vec<u64>, Vec<usize>) {
+    let mut path = Vec::new();
+    weave.get_active_path(&mut path);
+    path.reverse();
+    let mut starts = Vec::with_capacity(path.len() + 1);
+    let mut cursor = 0_usize;
+    for id in &path {
+        starts.push(cursor);
+        cursor += weave
+            .get_contents(id)
+            .map_or(0, |contents| contents.0.len());
+    }
+    starts.push(cursor);
+    (path, starts)
+}
+
+/// Switches the active path to an existing branch that already holds `replacement` in
+/// place of the `old` byte range, returning whether one was found.
+///
+/// [`PatchablePathWeave::replace`] would link a new node from the node before the range
+/// (or make it a root) to the node after it (or make it the tip). A branch qualifies
+/// when the range covers whole nodes and a chain of existing nodes runs between those
+/// same neighbours with exactly the replacement text, so switching to it changes the
+/// path text identically without adding a node. Zero-width nodes let several node
+/// boundaries share one offset, so every combination that covers the range is tried.
+fn reuse_branch(weave: &mut PatchableIndependent, old: Range<usize>, replacement: &str) -> bool {
+    let (path, starts) = path_layout(weave);
+    for i in (0..starts.len()).filter(|&i| starts[i] == old.start) {
+        for j in (i..starts.len()).filter(|&j| starts[j] == old.end) {
+            let parent = i.checked_sub(1).map(|index| path[index]);
+            let child = path.get(j).copied();
+            let heads: Vec<u64> = match parent {
+                Some(parent) => weave
+                    .get_children(&parent)
+                    .map(|children| children.iter().copied().collect())
+                    .unwrap_or_default(),
+                None => weave.roots().iter().copied().collect(),
+            };
+            let mut branch = Vec::new();
+            let mut visited = HashSet::new();
+            if heads.into_iter().any(|head| {
+                extend_branch(weave, head, replacement, child, &mut branch, &mut visited)
+            }) {
+                let active: Vec<u64> = path[..i]
+                    .iter()
+                    .chain(&branch)
+                    .chain(&path[j..])
+                    .copied()
+                    .collect();
+                weave.set_active_path(active.into_iter());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extends `branch` with `id` and then, depth first, with a chain of its descendants
+/// whose contents spell out `remaining` and whose last node is a parent of `child`
+/// (or any node, when there is no `child`). Leaves `branch` unchanged on failure.
+///
+/// `visited` records (node, bytes left) pairs that already failed, so shared
+/// descendants are not searched again from the same position.
+fn extend_branch(
+    weave: &PatchableIndependent,
+    id: u64,
+    remaining: &str,
+    child: Option<u64>,
+    branch: &mut Vec<u64>,
+    visited: &mut HashSet<(u64, usize)>,
+) -> bool {
+    let Some(rest) = weave
+        .get_contents(&id)
+        .and_then(|contents| remaining.strip_prefix(contents.0.as_str()))
+    else {
+        return false;
+    };
+    if !visited.insert((id, rest.len())) {
+        return false;
+    }
+    let Some(children) = weave.get_children(&id) else {
+        return false;
+    };
+    branch.push(id);
+    if rest.is_empty() && child.is_none_or(|child| children.contains(&child)) {
+        return true;
+    }
+    if children
+        .iter()
+        .any(|&next| extend_branch(weave, next, rest, child, branch, visited))
+    {
+        return true;
+    }
+    branch.pop();
+    false
 }
 
 /// One changed range of a text edit, as byte offsets into the original and edited texts.
@@ -1645,6 +1800,153 @@ mod tests {
         assert_eq!(summary.hunks, 1);
         assert_eq!(summary.created_nodes, document.len() - nodes);
         assert_eq!(summary.focus, Some(find(&document, " two")));
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn changing_text_back_reuses_the_existing_branch() {
+        let mut document = independent_chain(&["hello cruel world"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "hello kind world", &mut next_id));
+        assert_eq!(next_id, 13);
+        let nodes = document.len();
+        let (cruel, kind) = (find(&document, "cruel"), find(&document, "kind"));
+        assert!(!document.node_info(&cruel).unwrap().active);
+
+        let (path, text) = document.active_path_text();
+        let summary = document
+            .replace_active_path_text(&path, &text, "hello cruel world", &mut next_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.hunks, 1);
+        assert_eq!(summary.reused_branches, 1);
+        assert_eq!(summary.created_nodes, 0);
+        assert_eq!(summary.focus, Some(cruel));
+        assert_eq!(document.len(), nodes, "no duplicate node was created");
+        assert_eq!(next_id, 13, "no identifiers were consumed");
+        assert_eq!(document.active_path_text().1, "hello cruel world");
+        assert!(document.node_info(&cruel).unwrap().active);
+        assert!(!document.node_info(&kind).unwrap().active);
+        assert!(
+            document
+                .formatted_actions()
+                .join("\n")
+                .contains("SetActivePath")
+        );
+        assert!(document.is_valid());
+
+        // Switching between earlier versions never grows the graph.
+        for edited in ["hello kind world", "hello cruel world", "hello kind world"] {
+            assert!(replace(&mut document, edited, &mut next_id));
+            assert_eq!(document.active_path_text().1, edited);
+            assert_eq!(document.len(), nodes);
+        }
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn reuse_covers_multi_node_branches_insertions_and_roots() {
+        // A replacement spelled out by a chain of existing nodes.
+        let mut document = independent_chain(&["one ", "two ", "three"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "one X", &mut next_id));
+        let nodes = document.len();
+        assert!(replace(&mut document, "one two three", &mut next_id));
+        assert_eq!(document.active_path(), vec![2, 1, 0]);
+        assert_eq!(document.len(), nodes);
+        assert!(document.is_valid());
+
+        // An insertion that an earlier edit deleted again.
+        let mut document = independent_chain(&["hello world"]);
+        assert!(replace(&mut document, "hello wide world", &mut next_id));
+        assert!(replace(&mut document, "hello world", &mut next_id));
+        let nodes = document.len();
+        let wide = find(&document, "wide ");
+        assert!(!document.node_info(&wide).unwrap().active);
+        assert!(replace(&mut document, "hello wide world", &mut next_id));
+        assert_eq!(document.len(), nodes);
+        assert!(document.node_info(&wide).unwrap().active);
+        assert_eq!(document.active_path_text().1, "hello wide world");
+        assert!(document.is_valid());
+
+        // A replaced root.
+        let mut document = independent_chain(&["hello", " world"]);
+        assert!(replace(&mut document, "hi world", &mut next_id));
+        let nodes = document.len();
+        let hi = find(&document, "hi");
+        assert!(document.node_info(&hi).unwrap().parents.is_empty());
+        assert!(replace(&mut document, "hello world", &mut next_id));
+        assert_eq!(document.len(), nodes);
+        assert_eq!(document.active_path(), vec![1, 0]);
+        assert!(!document.node_info(&hi).unwrap().active);
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn branches_with_a_different_continuation_are_not_reused() {
+        let mut weave = IndependentDemoWeave::with_capacity(8, String::new());
+        let node = |id: u64, parents: &[u64], active: bool, text: &str| IndependentDemoNode {
+            id,
+            from: parents.iter().copied().collect(),
+            to: IndexSet::default(),
+            active,
+            bookmarked: false,
+            contents: TextContent(text.to_string()),
+        };
+        assert!(weave.insert(node(0, &[], true, "a ")));
+        assert!(weave.insert(node(1, &[0], true, "b")));
+        assert!(weave.insert(node(2, &[1], true, " c")));
+        // "x" continues into " z", not into " c", so "a x c" is not an existing path.
+        assert!(weave.insert(node(3, &[0], false, "x")));
+        assert!(weave.insert(node(4, &[3], false, " z")));
+        let mut document = Document::new_independent(weave);
+
+        let (path, text) = document.active_path_text();
+        assert_eq!(text, "a b c");
+        let mut next_id = 10;
+        let summary = document
+            .replace_active_path_text(&path, &text, "a x c", &mut next_id, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(summary.reused_branches, 0);
+        assert_eq!(summary.created_nodes, 1);
+        assert_eq!(document.active_path_text().1, "a x c");
+        assert!(!document.node_info(&3).unwrap().active);
+        assert_eq!(document.node_info(&2).unwrap().parents, vec![1, 10]);
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn paths_can_be_restored_while_their_nodes_still_form_a_chain() {
+        let mut document = seeded_independent();
+        let original = document.active_path();
+        assert_eq!(original, vec![3, 1, 0]);
+        assert!(document.set_active(&4));
+        assert_eq!(document.active_path(), vec![4, 2, 0]);
+        assert!(document.can_restore_path(&original));
+        document.restore_path(&original).unwrap();
+        assert_eq!(document.active_path(), original);
+        assert_eq!(document.active_set(), HashSet::from([0, 1, 3]));
+        assert!(document.is_valid());
+
+        // An empty path deactivates everything.
+        document.restore_path(&[]).unwrap();
+        assert!(document.active_path().is_empty());
+        assert!(document.is_valid());
+
+        // Broken chains, non-roots, and removed nodes are refused.
+        assert!(!document.can_restore_path(&[3, 0]));
+        assert!(!document.can_restore_path(&[1]));
+        assert_eq!(document.remove(&1), Some(2));
+        assert!(!document.can_restore_path(&original));
+        let error = document.restore_path(&original).unwrap_err();
+        assert!(error.contains("can no longer be restored"));
+
+        // Tree documents restore a path through its tip.
+        let mut document = seeded_dependent();
+        assert!(document.set_active(&4));
+        document.restore_path(&[3, 1, 0]).unwrap();
+        assert_eq!(document.active_path(), vec![3, 1, 0]);
         assert!(document.is_valid());
     }
 

@@ -187,6 +187,24 @@ impl EditorState {
         self.status = "Reset active-path edit buffer".to_string();
     }
 
+    /// Makes the path a stale edit was staged on active again, so the edit applies.
+    fn restore_reading_path(&mut self) {
+        if let Err(error) = self.document.restore_path(&self.reading_original_path) {
+            self.status = error;
+            return;
+        }
+        self.status = match self.sync_reading_buffer() {
+            BufferStatus::Staged => {
+                "Restored the active path; the staged edit can be applied".to_string()
+            }
+            BufferStatus::Stale => {
+                "Restored the active path, but its text changed; reset the buffer before applying"
+                    .to_string()
+            }
+            BufferStatus::Clean => "Restored the active path".to_string(),
+        };
+    }
+
     fn apply_reading_buffer(&mut self) {
         match self.document.replace_active_path_text(
             &self.reading_original_path,
@@ -207,13 +225,25 @@ impl EditorState {
                     self.selected = Some(id);
                     self.edit_for = None;
                 }
-                let created = if summary.created_nodes == 0 {
+                let mut details = Vec::new();
+                if summary.created_nodes > 0 {
+                    details.push(format!("creating {}", count(summary.created_nodes, "node")));
+                }
+                if summary.reused_branches > 0 {
+                    let noun = if summary.reused_branches == 1 {
+                        "existing branch"
+                    } else {
+                        "existing branches"
+                    };
+                    details.push(format!("switching to {} {noun}", summary.reused_branches));
+                }
+                let details = if details.is_empty() {
                     String::new()
                 } else {
-                    format!(", creating {}", count(summary.created_nodes, "node"))
+                    format!(", {}", details.join(" and "))
                 };
                 self.status = format!(
-                    "Applied {} to the active path{created}; replaced text remains on alternate branches",
+                    "Applied {} to the active path{details}; replaced text remains on alternate branches",
                     count(summary.hunks, "change")
                 );
             }
@@ -651,7 +681,9 @@ impl EditorState {
                 let mut apply = ui.memory(|memory| memory.has_focus(editor_id))
                     && ui.input_mut(|input| input.consume_shortcut(&APPLY_SHORTCUT));
                 let mut reset = false;
+                let mut restore = false;
                 let mut copy = false;
+                let path = self.document.active_path();
 
                 // The controls live in the heading row so a long path can never push them
                 // out of the panel.
@@ -666,9 +698,28 @@ impl EditorState {
                         status,
                         "Active path changed; staged edit is stale",
                         "The staged text no longer matches the path it was typed on. Restore \
-                         the path to continue, or copy the staged text and Reset to reload \
-                         the path.",
+                         path makes that path active again so the edit applies; otherwise \
+                         copy the staged text and Reset to reload the current path.",
                     );
+                    if status == BufferStatus::Stale {
+                        let path_moved = path != self.reading_original_path;
+                        let restorable = path_moved
+                            && self.document.can_restore_path(&self.reading_original_path);
+                        restore = ui
+                            .add_enabled(restorable, egui::Button::new("Restore path"))
+                            .on_hover_text(
+                                "Make the path this edit was typed on active again, so the \
+                                 staged edit can be applied.",
+                            )
+                            .on_disabled_hover_text(if path_moved {
+                                "Nodes on that path were removed or moved, so it cannot be \
+                                 restored."
+                            } else {
+                                "That path is still active; its text changed underneath the \
+                                 edit instead."
+                            })
+                            .clicked();
+                    }
                     let shortcut = ui.ctx().format_shortcut(&APPLY_SHORTCUT);
                     apply |= ui
                         .add_enabled(
@@ -688,7 +739,6 @@ impl EditorState {
                 });
                 ui.separator();
 
-                let path = self.document.active_path();
                 if path.is_empty() && !editable {
                     ui.weak("No active node. Double-click a node or use “Set active”.");
                     return;
@@ -719,6 +769,8 @@ impl EditorState {
                         self.apply_reading_buffer();
                     } else if reset {
                         self.reset_reading_buffer();
+                    } else if restore {
+                        self.restore_reading_path();
                     } else if copy {
                         self.status =
                             "Copied the staged active-path text to the clipboard".to_string();
@@ -1255,6 +1307,75 @@ mod tests {
         assert_eq!(editor.sync_reading_buffer(), BufferStatus::Clean);
         assert_eq!(editor.reading_buffer, editor.document.active_path_text().1);
         assert!(!editor.reading_is_dirty());
+    }
+
+    #[test]
+    fn restoring_the_path_makes_a_stale_edit_applicable() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.reading_buffer.push_str(" typed");
+        let original = editor.reading_original_path.clone();
+        assert!(editor.document.set_active(&4));
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
+        assert!(editor.document.can_restore_path(&original));
+
+        editor.restore_reading_path();
+        assert_eq!(
+            editor.status,
+            "Restored the active path; the staged edit can be applied"
+        );
+        assert_eq!(editor.document.active_path(), original);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Staged);
+        editor.apply_reading_buffer();
+        assert!(
+            editor.status.starts_with("Applied 1 change"),
+            "{}",
+            editor.status
+        );
+        assert!(editor.document.active_path_text().1.ends_with(" typed"));
+
+        // A path whose text changed underneath the edit stays stale after restoring.
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.reading_buffer.push_str(" typed");
+        assert!(editor.document.apply_edit(&1, "rewritten".to_string()));
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
+        editor.restore_reading_path();
+        assert!(editor.status.contains("text changed"), "{}", editor.status);
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
+
+        // A path with a removed node cannot be restored, and the failure is reported.
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.reading_buffer.push_str(" typed");
+        assert_eq!(editor.document.remove(&3), Some(1));
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
+        assert!(
+            !editor
+                .document
+                .can_restore_path(&editor.reading_original_path)
+        );
+        editor.restore_reading_path();
+        assert!(
+            editor.status.contains("can no longer be restored"),
+            "{}",
+            editor.status
+        );
+        assert_eq!(editor.sync_reading_buffer(), BufferStatus::Stale);
+    }
+
+    #[test]
+    fn applying_reports_reused_branches() {
+        let mut editor = EditorState::new(seeded_independent(), 5, 1, String::new());
+        editor.reading_buffer = editor.reading_buffer.replacen("Tuesday", "Friday", 1);
+        editor.apply_reading_buffer();
+        let nodes = editor.document.len();
+        editor.reading_buffer = editor.reading_buffer.replacen("Friday", "Tuesday", 1);
+        editor.apply_reading_buffer();
+        assert_eq!(
+            editor.status,
+            "Applied 1 change to the active path, switching to 1 existing branch; \
+             replaced text remains on alternate branches"
+        );
+        assert_eq!(editor.document.len(), nodes);
+        assert!(editor.document.active_path_text().1.contains("Tuesday"));
     }
 
     #[test]

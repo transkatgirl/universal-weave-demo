@@ -51,16 +51,22 @@ several equivalent positions, such as an inserted repeated word, it is aligned
 to the nearest word, sentence, or line boundary. Text removed or replaced by a
 patch is preserved on alternate DAG branches instead of being destroyed, and
 inserted text continues only into the active path, never into the text it
-replaced. After applying, the status bar reports how many changes and nodes were
-created and the inspector selects the node at the first change. Typing at the
-end of a path whose tip is an empty node with no continuations, such as one just
-added with **Add child**, fills that node instead of inserting in front of it.
-**Reset** discards staged typing and reloads the current path. If a structural
-operation changes the path while an edit is staged, the reading view marks the
-staged edit as stale and disables Apply until the buffer is reset; Ctrl+Enter
-then reports why nothing was applied. Restoring the path makes the edit
-applicable again; otherwise **Copy staged text** puts the typing on the
-clipboard before **Reset** reloads the path. The inspector's contents editor
+replaced. If the new text of a change already exists as a branch at that
+position, for example because a word is changed back to what it was before an
+earlier apply, the active path switches to that branch instead of a duplicate
+node being created, so changing text back and forth never grows the graph.
+After applying, the status bar reports how many changes were applied, how many
+nodes were created or existing branches switched to, and the inspector selects
+the node at the first change. Typing at the end of a path whose tip is an empty
+node with no continuations, such as one just added with **Add child**, fills
+that node instead of inserting in front of it. **Reset** discards staged typing
+and reloads the current path. If a structural operation changes the path while
+an edit is staged, the reading view marks the staged edit as stale and disables
+Apply until the path is restored or the buffer is reset; Ctrl+Enter then
+reports why nothing was applied. **Restore path** makes the path the edit was
+typed on active again while its nodes still exist, so the edit becomes
+applicable; otherwise **Copy staged text** puts the typing on the clipboard
+before **Reset** reloads the path. The inspector's contents editor
 keeps the same kind of snapshot: if the selected node changes underneath staged
 typing, for example because a path edit split it, the inspector marks the edit
 stale and refuses to apply it until it is reset. Opening or creating a document
