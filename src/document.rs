@@ -2,7 +2,9 @@
 
 use std::collections::HashSet;
 use std::iter;
+use std::ops::Range;
 
+use dissimilar::Chunk;
 use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
 use universal_weave::wrappers::{LoggedWeave, PatchablePathWeave, WeaveAction};
@@ -331,7 +333,14 @@ impl Document {
         (path, text)
     }
 
-    /// Applies one minimal text replacement to an independent document's active path.
+    /// Applies the changes between `expected_text` and `edited_text` to an independent
+    /// document's active path.
+    ///
+    /// Each changed range found by [`text_hunks`] becomes one branch-preserving path
+    /// patch. Hunks are applied from the end of the text backwards so earlier byte
+    /// offsets stay valid and unchanged text between changes stays shared. Removed
+    /// text stays reachable on alternate branches, and inserted text continues only
+    /// into the active path, never into the text it replaced.
     ///
     /// `expected_path` and `expected_text` must still match the document. Generated
     /// nodes consume identifiers from the editor's existing arithmetic sequence.
@@ -362,16 +371,23 @@ impl Document {
             );
         };
 
-        let (prefix, old_end, replacement) = minimal_replacement(expected_text, edited_text);
+        let hunks = text_hunks(expected_text, edited_text);
         let apply = |target: &mut PatchableIndependent, generate_id: &mut dyn FnMut() -> u64| {
-            target.split_out(prefix..old_end, &mut *generate_id);
-            if !replacement.is_empty() {
-                target.insert_at(
-                    prefix,
-                    TextContent(replacement.to_string()),
-                    true,
-                    generate_id,
-                );
+            // Later hunks first, so the byte offsets of earlier hunks stay valid.
+            for hunk in hunks.iter().rev() {
+                target.split_out(hunk.old.clone(), &mut *generate_id);
+                let replacement = &edited_text[hunk.new.clone()];
+                if !replacement.is_empty() {
+                    // `prefix_all` stays false: the inserted node continues only into the
+                    // active path, so it is never linked to the text it replaced and
+                    // repeated insertions at one position grow the graph linearly.
+                    target.insert_at(
+                        hunk.old.start,
+                        TextContent(replacement.to_owned()),
+                        false,
+                        &mut *generate_id,
+                    );
+                }
             }
         };
 
@@ -669,31 +685,58 @@ impl Document {
     }
 }
 
-/// Finds the byte range of the one replacement between two UTF-8 strings.
-/// Both returned boundaries are guaranteed to be character boundaries.
-fn minimal_replacement<'a>(original: &str, edited: &'a str) -> (usize, usize, &'a str) {
-    let prefix = original
-        .chars()
-        .zip(edited.chars())
-        .take_while(|(left, right)| left == right)
-        .map(|(character, _)| character.len_utf8())
-        .sum::<usize>();
+/// One changed range of a text edit, as byte offsets into the original and edited texts.
+///
+/// `old` is the replaced range of the original text and `new` the range of the edited
+/// text that takes its place; either may be empty for a pure insertion or deletion.
+/// All four boundaries are character boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextHunk {
+    old: Range<usize>,
+    new: Range<usize>,
+}
 
-    let original_tail = &original[prefix..];
-    let edited_tail = &edited[prefix..];
-    let suffix = original_tail
-        .chars()
-        .rev()
-        .zip(edited_tail.chars().rev())
-        .take_while(|(left, right)| left == right)
-        .map(|(character, _)| character.len_utf8())
-        .sum::<usize>();
+/// Finds every changed range between two UTF-8 strings, in text order.
+///
+/// Unchanged text between changes is left in place rather than folded into one
+/// large replacement. Where a change could sit at several equivalent positions,
+/// such as an inserted repeated word, it is aligned to the nearest word, sentence,
+/// or line boundary so the resulting node contents stay readable.
+fn text_hunks(original: &str, edited: &str) -> Vec<TextHunk> {
+    let mut hunks = Vec::new();
+    let mut pending: Option<TextHunk> = None;
+    let (mut old_cursor, mut new_cursor) = (0_usize, 0_usize);
 
-    (
-        prefix,
-        original.len() - suffix,
-        &edited[prefix..edited.len() - suffix],
-    )
+    for chunk in dissimilar::diff(original, edited) {
+        match chunk {
+            Chunk::Equal(text) => {
+                hunks.extend(pending.take());
+                old_cursor += text.len();
+                new_cursor += text.len();
+            }
+            Chunk::Delete(text) => {
+                let hunk = pending.get_or_insert(TextHunk {
+                    old: old_cursor..old_cursor,
+                    new: new_cursor..new_cursor,
+                });
+                old_cursor += text.len();
+                hunk.old.end = old_cursor;
+            }
+            Chunk::Insert(text) => {
+                let hunk = pending.get_or_insert(TextHunk {
+                    old: old_cursor..old_cursor,
+                    new: new_cursor..new_cursor,
+                });
+                new_cursor += text.len();
+                hunk.new.end = new_cursor;
+            }
+        }
+    }
+    hunks.extend(pending);
+
+    debug_assert_eq!(old_cursor, original.len());
+    debug_assert_eq!(new_cursor, edited.len());
+    hunks
 }
 
 /// Indicates which peer incorporated remote changes during a synchronization pass.
@@ -921,6 +964,27 @@ mod tests {
             .unwrap()
     }
 
+    /// The identifier of the one node whose contents equal `contents`.
+    fn find(document: &Document, contents: &str) -> u64 {
+        let ids: Vec<u64> = (0..=document.max_id().unwrap())
+            .filter(|id| document.node_contents(id).as_deref() == Some(contents))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected one node containing {contents:?}, found {ids:?}"
+        );
+        ids[0]
+    }
+
+    /// The number of parent-child edges in the document.
+    fn edge_count(document: &Document) -> usize {
+        (0..=document.max_id().unwrap())
+            .filter_map(|id| document.node_info(&id))
+            .map(|info| info.children.len())
+            .sum()
+    }
+
     #[test]
     fn seeded_dependent_is_valid() {
         let mut document = seeded_dependent();
@@ -1009,11 +1073,149 @@ mod tests {
         assert_eq!(document.active_path_text().1, "hello kind world");
         assert_eq!(document.node_contents(&11).as_deref(), Some("cruel"));
         assert!(!document.node_info(&11).unwrap().active);
+
+        // The replacement continues only into the shared suffix; it must not become a
+        // prefix of the text it replaced, so "hello kind cruel world" is not a path.
+        let (head, kind, cruel, tail) = (
+            find(&document, "hello "),
+            find(&document, "kind"),
+            find(&document, "cruel"),
+            find(&document, " world"),
+        );
+        assert_eq!(document.node_info(&kind).unwrap().children, vec![tail]);
+        assert_eq!(document.node_info(&cruel).unwrap().parents, vec![head]);
+        assert_eq!(document.node_info(&cruel).unwrap().children, vec![tail]);
+
         let actions = document.formatted_actions().join("\n");
         assert!(actions.contains("SplitNode"));
         assert!(actions.contains("AddNode"));
         assert!(actions.contains("SetActivePath"));
         assert!(document.is_valid());
+    }
+
+    #[test]
+    fn repeated_insertions_at_one_position_grow_linearly() {
+        let mut document = independent_chain(&["hello world"]);
+        let mut next_id = 10;
+        let edits = [
+            "hello Aworld",
+            "hello BAworld",
+            "hello CBAworld",
+            "hello DCBAworld",
+        ];
+        for (round, edited) in edits.into_iter().enumerate() {
+            assert!(replace(&mut document, edited, &mut next_id));
+            assert_eq!(document.active_path_text().1, edited);
+            // One edge joins the original halves; each insertion adds exactly two more.
+            assert_eq!(edge_count(&document), 1 + 2 * (round + 1));
+        }
+        // Each inserted letter continues only into the letter inserted before it.
+        let (latest, previous) = (find(&document, "D"), find(&document, "C"));
+        assert_eq!(
+            document.node_info(&latest).unwrap().children,
+            vec![previous]
+        );
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn separate_changes_become_separate_patches_that_share_unchanged_text() {
+        let mut document = independent_chain(&["one two three"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "ONE two THREE", &mut next_id));
+        assert_eq!(document.active_path_text().1, "ONE two THREE");
+
+        // The untouched middle is a single node shared by the old and new branches.
+        let middle = document.node_info(&find(&document, " two ")).unwrap();
+        let (one, capital_one) = (find(&document, "one"), find(&document, "ONE"));
+        let (three, capital_three) = (find(&document, "three"), find(&document, "THREE"));
+        assert!(middle.parents.contains(&one) && middle.parents.contains(&capital_one));
+        assert_eq!(
+            middle.children.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([three, capital_three])
+        );
+        assert!(!document.node_info(&one).unwrap().active);
+        assert!(!document.node_info(&three).unwrap().active);
+        assert!(document.is_valid());
+
+        // Several hunks spanning several nodes apply in one pass.
+        let mut document =
+            independent_chain(&["The keeper ", "found the letter ", "on a Tuesday."]);
+        let mut next_id = 20;
+        let edited = "A keeper found the old letter on a Friday.";
+        assert!(replace(&mut document, edited, &mut next_id));
+        assert_eq!(document.active_path_text().1, edited);
+        assert!(!document.node_info(&find(&document, "The")).unwrap().active);
+        assert_eq!(
+            document
+                .node_info(&find(&document, "old "))
+                .unwrap()
+                .children
+                .len(),
+            1
+        );
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn ambiguous_insertions_align_to_word_boundaries() {
+        // "wide " could equally be inserted as "ide w" after "hello w"; prefer the word.
+        let mut document = independent_chain(&["hello world"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "hello wide world", &mut next_id));
+        assert_eq!(document.active_path_text().1, "hello wide world");
+        let (head, inserted, tail) = (
+            find(&document, "hello "),
+            find(&document, "wide "),
+            find(&document, "world"),
+        );
+        assert_eq!(document.node_info(&inserted).unwrap().parents, vec![head]);
+        assert_eq!(document.node_info(&inserted).unwrap().children, vec![tail]);
+        assert!(document.is_valid());
+
+        // Appending a repeated word stays at the end instead of sliding to the front.
+        let mut document = independent_chain(&["ab ab ab"]);
+        let mut next_id = 10;
+        assert!(replace(&mut document, "ab ab ab ab", &mut next_id));
+        let appended = find(&document, " ab");
+        assert_eq!(
+            document.node_info(&appended).unwrap().parents,
+            vec![find(&document, "ab ab ab")]
+        );
+        assert!(document.is_valid());
+    }
+
+    #[test]
+    fn text_hunks_report_every_change_with_character_boundaries() {
+        assert_eq!(text_hunks("same", "same"), vec![]);
+        assert_eq!(
+            text_hunks("one two three", "ONE two THREE"),
+            vec![
+                TextHunk {
+                    old: 0..3,
+                    new: 0..3
+                },
+                TextHunk {
+                    old: 8..13,
+                    new: 8..13
+                },
+            ]
+        );
+        // Pure insertion and pure deletion, including multi-byte characters.
+        assert_eq!(
+            text_hunks("aé🙂z", "aé🙂🦀z"),
+            vec![TextHunk {
+                old: 7..7,
+                new: 7..11
+            }]
+        );
+        assert_eq!(
+            text_hunks("aé🙂z", "az"),
+            vec![TextHunk {
+                old: 1..7,
+                new: 1..1
+            }]
+        );
     }
 
     #[test]

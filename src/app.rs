@@ -501,7 +501,7 @@ impl EditorState {
                             self.reset_reading_buffer();
                         }
                     });
-                    ui.weak("Typing is staged locally; applying creates one branch-preserving path patch.");
+                    ui.weak("Typing is staged locally; applying turns each changed range into a branch-preserving path patch.");
                 } else {
                     let text = path
                         .iter()

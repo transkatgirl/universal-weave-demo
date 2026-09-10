@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dissimilar = "1.0"
 universal-weave = { version = "0.8.0", features = [
 	"layout",
 	"rkyv",

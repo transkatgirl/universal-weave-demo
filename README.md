@@ -37,13 +37,18 @@ central canvas renders a scrollable topological 2D graph; click a node to select
 it and double-click it to change its active state.
 
 For independent DAG documents, the reading view is also an active-path editor.
-Typing is staged locally until **Apply** is clicked, then the smallest changed
-Unicode-safe range is applied as one structural path patch. Text removed or
-replaced by the patch is preserved on alternate DAG branches instead of being
-destroyed. **Reset** discards staged typing and reloads the current path. If a
-structural operation changes the path while an edit is staged, Apply rejects the
-stale edit until the buffer is reset. Dependent and Loro reading views remain
-read-only.
+Typing is staged locally until **Apply** is clicked, then a character-level diff
+turns each changed range into its own structural path patch. Patches are applied
+from the end of the text backwards, so unchanged text between two changes stays
+a single node shared by the old and new branches. Where a change could sit at
+several equivalent positions, such as an inserted repeated word, it is aligned
+to the nearest word, sentence, or line boundary so node contents stay readable.
+Text removed or replaced by a patch is preserved on alternate DAG branches
+instead of being destroyed, and inserted text continues only into the active
+path, never into the text it replaced. **Reset** discards staged typing and
+reloads the current path. If a structural operation changes the path while an
+edit is staged, Apply rejects the stale edit until the buffer is reset.
+Dependent and Loro reading views remain read-only.
 
 Creating a `DependentLoroWeave` opens a second peer window. The two local peers
 can be taken offline, edited independently, and reconnected to demonstrate
