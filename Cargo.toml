@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 dissimilar = "1.0"
-universal-weave = { git = "https://github.com/transkatgirl/universal-weave.git", features = [
+universal-weave = { version = "0.8.1", features = [
 	"layout",
 	"rkyv",
 	"serde",

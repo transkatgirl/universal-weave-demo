@@ -4270,8 +4270,9 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "universal-weave"
-version = "0.8.0"
-source = "git+https://github.com/transkatgirl/universal-weave.git#dfdac1ee0a49df31782ed0ac5cec1ca3a606445d"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0671bcad383b3b7c58621756d90efa611fa591672c99587ec173450506bdf758"
 dependencies = [
  "contracts",
  "glam",
