@@ -1,6 +1,7 @@
 //! A document: either weave implementation plus its action log, behind a single API.
 
 use std::collections::HashSet;
+use std::iter;
 
 use universal_weave::indexmap::IndexSet;
 use universal_weave::loro::ExportMode;
@@ -362,75 +363,52 @@ impl Document {
         };
 
         let (prefix, old_end, replacement) = minimal_replacement(expected_text, edited_text);
-
-        // Determine the wrapper's exact identifier demand with fresh throwaway ids.
-        // Patch operations can request at most five (two boundary splits, a removal
-        // anchor, an insertion split/anchor, and the replacement node).
-        let mut probe_ids = Vec::with_capacity(5);
-        let mut probe = 0_u64;
-        while probe_ids.len() < 5 {
-            if !weave.contains(&probe) {
-                probe_ids.push(probe);
+        let apply = |target: &mut PatchableIndependent, generate_id: &mut dyn FnMut() -> u64| {
+            target.split_out(prefix..old_end, &mut *generate_id);
+            if !replacement.is_empty() {
+                target.insert_at(
+                    prefix,
+                    TextContent(replacement.to_string()),
+                    true,
+                    generate_id,
+                );
             }
-            probe = probe
-                .checked_add(1)
-                .ok_or_else(|| "No identifiers are available for path editing".to_string())?;
-        }
-        let mut dry_run = (**weave).clone();
-        let mut probes = probe_ids.into_iter();
-        let mut demanded = 0_usize;
-        let mut generate_probe = || {
-            demanded += 1;
-            probes
-                .next()
-                .expect("patch operations request at most five ids")
         };
-        if prefix < old_end {
-            dry_run.split_out(prefix..old_end, &mut generate_probe);
-        }
-        if !replacement.is_empty() {
-            dry_run.insert_at(
-                prefix,
-                TextContent(replacement.to_string()),
-                &mut generate_probe,
-            );
-        }
 
-        let mut generated = Vec::with_capacity(demanded);
-        let mut candidate = *next_id;
-        for index in 0..demanded {
-            if weave.contains(&candidate) || generated.contains(&candidate) {
+        // The wrapper's id callback is infallible, so measure the exact demand on a
+        // throwaway clone (fed any unused ids) before touching the editor's sequence.
+        let mut demanded = 0_usize;
+        let mut unused = (0_u64..).filter(|id| !weave.contains(id));
+        apply(&mut (**weave).clone(), &mut || {
+            demanded += 1;
+            unused.next().expect("an unused identifier always exists")
+        });
+
+        let mut ids = Vec::with_capacity(demanded);
+        let mut sequence = iter::successors(Some(*next_id), |id| id.checked_add(id_step));
+        for _ in 0..demanded {
+            let id = sequence.next().ok_or_else(|| {
+                "Identifier sequence exhausted while preparing the path edit".to_string()
+            })?;
+            if weave.contains(&id) || ids.contains(&id) {
                 return Err(format!(
-                    "Identifier sequence is exhausted or collides at #{candidate}"
+                    "Identifier sequence is exhausted or collides at #{id}"
                 ));
             }
-            generated.push(candidate);
-            if index + 1 < demanded {
-                candidate = candidate.checked_add(id_step).ok_or_else(|| {
-                    "Identifier sequence exhausted while preparing the path edit".to_string()
-                })?;
-            }
+            ids.push(id);
         }
 
         let mut patched = (**weave).clone();
-        let mut ids = generated.into_iter();
-        let mut generate_id = || {
-            ids.next()
+        let mut remaining = ids.iter().copied();
+        apply(&mut patched, &mut || {
+            remaining
+                .next()
                 .expect("identifier demand was measured in advance")
-        };
-        if prefix < old_end {
-            patched.split_out(prefix..old_end, &mut generate_id);
-        }
-        if !replacement.is_empty() {
-            patched.insert_at(
-                prefix,
-                TextContent(replacement.to_string()),
-                &mut generate_id,
-            );
-        }
-        debug_assert!(ids.next().is_none());
-        if demanded > 0 {
-            *next_id = candidate.saturating_add(id_step);
+        });
+        debug_assert!(remaining.next().is_none());
+
+        if let Some(last) = ids.last() {
+            *next_id = last.saturating_add(id_step);
         }
         **weave = patched;
         Ok(true)
