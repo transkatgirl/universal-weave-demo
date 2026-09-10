@@ -116,7 +116,7 @@ fn change_highlight() -> Color32 {
     Color32::YELLOW.gamma_multiply(0.3)
 }
 
-/// The underline marking the character beside removed text.
+/// The underline marking the visible character nearest to removed text.
 const REMOVAL_MARK: Stroke = Stroke {
     width: 1.5,
     color: Color32::LIGHT_RED,
@@ -125,7 +125,8 @@ const REMOVAL_MARK: Stroke = Stroke {
 /// Lays out the reading editor's text with its staged edit previewed.
 ///
 /// Alternate nodes are shaded so their boundaries show, text a change would add is
-/// highlighted, and the character beside removed text is underlined. Font and color
+/// highlighted, and the visible character nearest to removed text is underlined (a
+/// line break there has no glyph, so the other side of the removal is marked). Font and color
 /// follow egui's own text-edit layout, so the preview changes nothing else.
 fn preview_layout(
     ui: &egui::Ui,
@@ -838,7 +839,7 @@ impl EditorState {
                         &format!("{} staged", count(changes, "change")),
                         "Highlighted text becomes new nodes when applied, or switches the \
                          path to a branch that already holds it. A red underline marks the \
-                         character beside removed text. Shaded bands show where the existing \
+                         character next to removed text. Shaded bands show where the existing \
                          nodes meet.",
                         "Active path changed; staged edit is stale",
                         "The staged text no longer matches the path it was typed on. Restore \
@@ -1350,7 +1351,7 @@ mod tests {
                 sections(&galley, edited, |format| format.underline != Stroke::NONE).is_empty()
             );
 
-            // Removed text underlines the character beside it.
+            // Removed text underlines the character next to it.
             let edited = "one";
             let preview = preview_edit("one two", edited, &[4, 3]);
             let galley = preview_layout(ui, edited, &preview, f32::INFINITY);

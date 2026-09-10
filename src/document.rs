@@ -1000,6 +1000,47 @@ fn is_grapheme_boundary(text: &str, at: usize) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether a grapheme cluster is a line break, which is laid out as a row break rather
+/// than a glyph and so cannot carry a visible mark.
+fn is_line_break(grapheme: &str) -> bool {
+    matches!(grapheme, "\n" | "\r\n" | "\r")
+}
+
+/// The grapheme cluster of `text` to mark for text removed at byte `at`, if any.
+///
+/// The removal has no text of its own, so the cluster after it is marked, or the one
+/// before it at the end of the text. A line break there would leave the mark
+/// invisible, so the other neighbour is used instead: removing the end of a line marks
+/// the line's last character. When line breaks surround the removal, as after removing
+/// a whole line, the closest visible cluster before it is marked, so the mark ends the
+/// line the removed text followed; at the start of the text, the closest one after it.
+fn removal_mark(text: &str, at: usize) -> Option<Range<usize>> {
+    let after = grapheme_at(text, at).map(|grapheme| at..at + grapheme.len());
+    let before = grapheme_before(text, at).map(|grapheme| at - grapheme.len()..at);
+    if let Some(mark) = [after, before]
+        .into_iter()
+        .flatten()
+        .find(|mark| !is_line_break(&text[mark.clone()]))
+    {
+        return Some(mark);
+    }
+    let mut cursor = at;
+    while let Some(grapheme) = grapheme_before(text, cursor) {
+        cursor -= grapheme.len();
+        if !is_line_break(grapheme) {
+            return Some(cursor..cursor + grapheme.len());
+        }
+    }
+    let mut cursor = at;
+    while let Some(grapheme) = grapheme_at(text, cursor) {
+        if !is_line_break(grapheme) {
+            return Some(cursor..cursor + grapheme.len());
+        }
+        cursor += grapheme.len();
+    }
+    None
+}
+
 /// Whether a grapheme cluster carries a letter or digit, such as `e` with a combining accent.
 fn is_alphanumeric_grapheme(grapheme: &str) -> bool {
     grapheme.chars().any(char::is_alphanumeric)
@@ -1132,15 +1173,17 @@ pub enum PreviewKind {
 pub struct PreviewSpan {
     pub range: Range<usize>,
     pub kind: PreviewKind,
-    /// Whether this span is the character beside a point where text was removed
-    /// without replacement, so the removal can be marked although it has no text.
+    /// Whether this span is the visible character nearest to a point where text was
+    /// removed without replacement, so the removal can be marked although it has no
+    /// text of its own. See [`removal_mark`].
     pub marks_removal: bool,
 }
 
 /// What applying an edit would change, laid over the edited text for highlighting.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditPreview {
-    /// Non-empty spans covering the whole edited text in order, without gaps.
+    /// Non-empty spans covering the whole edited text in order, without gaps; adjacent
+    /// spans always differ in kind or mark.
     pub spans: Vec<PreviewSpan>,
     /// The number of changes an apply would make; zero when the texts are identical.
     pub changes: usize,
@@ -1186,24 +1229,18 @@ pub fn preview_edit(original: &str, edited: &str, node_lengths: &[usize]) -> Edi
     for hunk in &hunks {
         cuts.push(hunk.new.start);
         cuts.push(hunk.new.end);
-        if hunk.new.is_empty() {
-            let at = hunk.new.start;
-            let mark = if at < edited.len() {
-                grapheme_at(edited, at).map(|grapheme| at..at + grapheme.len())
-            } else {
-                grapheme_before(edited, at).map(|grapheme| at - grapheme.len()..at)
-            };
-            if let Some(mark) = mark {
-                cuts.push(mark.start);
-                cuts.push(mark.end);
-                removal_marks.push(mark);
-            }
+        if hunk.new.is_empty()
+            && let Some(mark) = removal_mark(edited, hunk.new.start)
+        {
+            cuts.push(mark.start);
+            cuts.push(mark.end);
+            removal_marks.push(mark);
         }
     }
     cuts.sort_unstable();
     cuts.dedup();
 
-    let mut spans = Vec::with_capacity(cuts.len());
+    let mut spans: Vec<PreviewSpan> = Vec::with_capacity(cuts.len());
     let mut earlier = hunks.iter().peekable();
     let (mut added, mut removed) = (0_usize, 0_usize);
     for pair in cuts.windows(2) {
@@ -1226,11 +1263,21 @@ pub fn preview_edit(original: &str, edited: &str, node_lengths: &[usize]) -> Edi
         let marks_removal = removal_marks
             .iter()
             .any(|mark| mark.start <= range.start && range.end <= mark.end);
-        spans.push(PreviewSpan {
-            range,
-            kind,
-            marks_removal,
-        });
+        // A removal point splits otherwise identical text; keep such runs whole.
+        match spans.last_mut() {
+            Some(previous)
+                if previous.kind == kind
+                    && previous.marks_removal == marks_removal
+                    && previous.range.end == range.start =>
+            {
+                previous.range.end = range.end;
+            }
+            _ => spans.push(PreviewSpan {
+                range,
+                kind,
+                marks_removal,
+            }),
+        }
     }
 
     EditPreview {
@@ -1914,7 +1961,7 @@ mod tests {
             preview_edit("one two three", "ONE two THREE", &[13]).changes,
             2
         );
-        // Removed text has nothing to highlight, so the character beside it is marked:
+        // Removed text has nothing to highlight, so the character next to it is marked:
         // the one after the removal, or the one before it at the end of the text.
         assert_eq!(
             preview_spans("one two", "two", &[4, 3]),
@@ -1937,6 +1984,70 @@ mod tests {
         // Removing everything leaves nothing to mark.
         assert_eq!(preview_spans("gone", "", &[4]), vec![]);
         assert_eq!(preview_edit("gone", "", &[4]).changes, 1);
+    }
+
+    #[test]
+    fn removal_marks_land_on_visible_characters_around_line_breaks() {
+        use PreviewKind::Shared;
+        // Removing the end of a line marks the line's last character, since the line
+        // break after the removal has no glyph to underline.
+        assert_eq!(
+            preview_spans("hello world\nnext", "hello\nnext", &[16]),
+            vec![
+                (0..4, Shared { node: 0 }, false),
+                (4..5, Shared { node: 0 }, true),
+                (5..10, Shared { node: 0 }, false),
+            ]
+        );
+        // The same applies when the text ends with the line break.
+        assert_eq!(
+            preview_spans("line\nmore", "line\n", &[9]),
+            vec![
+                (0..3, Shared { node: 0 }, false),
+                (3..4, Shared { node: 0 }, true),
+                (4..5, Shared { node: 0 }, false),
+            ]
+        );
+        // A removed line leaves line breaks on both sides; the mark ends the line the
+        // removed text followed, or starts the next one at the top of the text.
+        assert_eq!(
+            preview_spans("a\nXYZ\nb", "a\n\nb", &[7]),
+            vec![
+                (0..1, Shared { node: 0 }, true),
+                (1..4, Shared { node: 0 }, false)
+            ]
+        );
+        assert_eq!(
+            preview_spans("XYZ\nb", "\nb", &[5]),
+            vec![
+                (0..1, Shared { node: 0 }, false),
+                (1..2, Shared { node: 0 }, true)
+            ]
+        );
+        // Windows line endings count as line breaks too.
+        assert_eq!(
+            preview_spans("ab cd\r\nef", "ab\r\nef", &[9]),
+            vec![
+                (0..1, Shared { node: 0 }, false),
+                (1..2, Shared { node: 0 }, true),
+                (2..6, Shared { node: 0 }, false),
+            ]
+        );
+        // A removal with nothing visible anywhere near it is still counted.
+        assert_eq!(
+            preview_spans("\n\n", "\n", &[2]),
+            vec![(0..1, Shared { node: 0 }, false)]
+        );
+        assert_eq!(preview_edit("\n\n", "\n", &[2]).changes, 1);
+        // A visible neighbour after the removal is still preferred.
+        assert_eq!(
+            preview_spans("one\ntwo three", "one\nthree", &[13]),
+            vec![
+                (0..4, Shared { node: 0 }, false),
+                (4..5, Shared { node: 0 }, true),
+                (5..9, Shared { node: 0 }, false),
+            ]
+        );
     }
 
     #[test]

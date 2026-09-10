@@ -75,8 +75,9 @@ edits are not part of the saved file. Dependent and Loro reading views remain
 read-only.
 
 While an edit is staged, the editor previews it: text a change would add is
-highlighted, the character beside removed text is underlined, and alternate
-nodes are shaded so their boundaries stay visible. The heading counts the staged
+highlighted, the visible character nearest to removed text is underlined (the
+end of the line when text was removed before a line break), and alternate nodes
+are shaded so their boundaries stay visible. The heading counts the staged
 changes. Ctrl+Enter (⌘+Enter on macOS) also applies the inspector's contents
 editor while it has keyboard focus.
 
